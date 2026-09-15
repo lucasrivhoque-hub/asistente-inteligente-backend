@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<title>Asistente Inteligente</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div id="login-view" class="card">
+  <h1>Asistente Inteligente</h1>
+  <p class="subtitle">Inicia sesión</p>
+  <input type="email" id="email" placeholder="Email">
+  <input type="password" id="password" placeholder="Contraseña">
+  <button onclick="iniciarSesion()">Ingresar</button>
+  <p id="error-msg" class="error"></p>
+</div>
+
+<div id="dashboard-view" class="card hidden">
+  <div class="header">
+    <div>
+      <h2 id="saludo"></h2>
+      <span id="rol-badge" class="badge"></span>
+    </div>
+    <button class="logout" onclick="cerrarSesion()">Salir</button>
+  </div>
+
+  <div id="seccion-alertas" class="section hidden">
+    <h3>Alertas recientes</h3>
+    <div id="lista-alertas"></div>
+  </div>
+
+  <div id="seccion-dispositivos" class="section hidden">
+    <h3>Dispositivos</h3>
+    <div id="lista-dispositivos"></div>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
