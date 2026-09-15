@@ -2,8 +2,8 @@ import asyncio
 import base64
 import json
 import os
-load_dotenv()
 from dotenv import load_dotenv
+load_dotenv()
 from datetime import datetime, timedelta
 
 from fastapi import (
