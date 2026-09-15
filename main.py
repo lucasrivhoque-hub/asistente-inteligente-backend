@@ -140,6 +140,9 @@ def usuario_actual(token: str = Depends(oauth2_scheme), db: Session = Depends(ge
         raise credenciales_invalidas
     return usuario
 
+# --- Estado del video en vivo (último frame recibido) ---
+ultimo_frame_b64 = None
+
 # --- API ---
 app = FastAPI(title="Asistente Inteligente API")
 
@@ -200,6 +203,23 @@ def listar_dispositivos(usuario: Usuario = Depends(usuario_actual), db: Session 
     dispositivos = db.query(Dispositivo).all()
     return [{"id": d.id, "nombre": d.nombre, "activo": d.activo} for d in dispositivos]
 
+@app.get("/video/ultimo-frame")
+def obtener_ultimo_frame(usuario: Usuario = Depends(usuario_actual)):
+    return {"frame": ultimo_frame_b64}
+
+@app.get("/estadisticas")
+def obtener_estadisticas(usuario: Usuario = Depends(usuario_actual), db: Session = Depends(get_db)):
+    total_alertas = db.query(Alerta).count()
+    total_dispositivos = db.query(Dispositivo).count()
+    dispositivos_activos = db.query(Dispositivo).filter(Dispositivo.activo == True).count()
+    ultima_alerta = db.query(Alerta).order_by(Alerta.timestamp.desc()).first()
+    return {
+        "total_alertas": total_alertas,
+        "total_dispositivos": total_dispositivos,
+        "dispositivos_activos": dispositivos_activos,
+        "ultima_actividad": ultima_alerta.timestamp.isoformat() if ultima_alerta else None,
+    }
+
 # --- WebSocket: sesión en vivo con el asistente de IA ---
 @app.websocket("/ws/asistente")
 async def websocket_asistente(websocket: WebSocket):
@@ -219,6 +239,7 @@ async def websocket_asistente(websocket: WebSocket):
             db.commit()
 
             async def recibir_del_cliente():
+                global ultimo_frame_b64
                 while True:
                     mensaje = await websocket.receive_text()
                     datos = json.loads(mensaje)
@@ -228,6 +249,7 @@ async def websocket_asistente(websocket: WebSocket):
                             audio=types.Blob(data=contenido, mime_type="audio/pcm;rate=16000")
                         )
                     elif datos["type"] == "video":
+                        ultimo_frame_b64 = datos["data"]
                         await session.send_realtime_input(
                             video=types.Blob(data=contenido, mime_type="image/jpeg")
                         )

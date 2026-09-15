@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <title>Asistente Inteligente</title>
 <link rel="stylesheet" href="style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
 </head>
 <body>
 
@@ -34,8 +35,8 @@
   <p class="switch-link">¿Ya tienes cuenta? <a onclick="mostrarLogin()">Inicia sesión</a></p>
 </div>
 
-<div id="dashboard-view" class="card hidden">
-  <div class="header">
+<div id="dashboard-view" class="dashboard hidden">
+  <div class="topbar">
     <div>
       <h2 id="saludo"></h2>
       <span id="rol-badge" class="badge"></span>
@@ -43,14 +44,40 @@
     <button class="logout" onclick="cerrarSesion()">Salir</button>
   </div>
 
-  <div id="seccion-alertas" class="section hidden">
-    <h3>Alertas recientes</h3>
-    <div id="lista-alertas"></div>
-  </div>
+  <div class="tabs" id="tabs"></div>
 
-  <div id="seccion-dispositivos" class="section hidden">
-    <h3>Dispositivos</h3>
-    <div id="lista-dispositivos"></div>
+  <div class="tab-content">
+    <section id="tab-resumen" class="tab-pane">
+      <div class="stats-grid">
+        <div class="stat-card"><span id="stat-alertas">–</span><label>Alertas totales</label></div>
+        <div class="stat-card"><span id="stat-dispositivos">–</span><label>Dispositivos</label></div>
+        <div class="stat-card"><span id="stat-actividad">–</span><label>Última actividad</label></div>
+      </div>
+      <div class="chart-box"><canvas id="grafico-alertas"></canvas></div>
+    </section>
+
+    <section id="tab-video" class="tab-pane">
+      <h3>Transmisión en vivo</h3>
+      <div class="video-box">
+        <img id="video-frame" class="hidden">
+        <p id="video-placeholder">Sin transmisión activa. Conecta el asistente para ver la cámara en vivo.</p>
+      </div>
+    </section>
+
+    <section id="tab-alertas" class="tab-pane">
+      <h3>Alertas recientes</h3>
+      <div id="lista-alertas"></div>
+    </section>
+
+    <section id="tab-dispositivos" class="tab-pane">
+      <h3>Dispositivos</h3>
+      <div id="lista-dispositivos"></div>
+    </section>
+
+    <section id="tab-config" class="tab-pane">
+      <h3>Configuración y diagnóstico</h3>
+      <p class="placeholder-note">Próximamente: umbrales de alerta, reinicio remoto de sesión, y registro detallado de errores por dispositivo.</p>
+    </section>
   </div>
 </div>
 

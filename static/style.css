@@ -65,3 +65,40 @@ select {
 .switch-link { font-size: 13px; margin-top: 14px; text-align: center; }
 .switch-link a { color: #028090; cursor: pointer; font-weight: bold; }
 .ok { color: #1e8449; }
+
+.dashboard {
+  background: white;
+  border-radius: 14px;
+  width: 90%;
+  max-width: 900px;
+  margin: 30px auto;
+  box-shadow: 0 10px 30px rgba(0,0,0,0.3);
+  overflow: hidden;
+}
+.topbar {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 24px 28px 0 28px;
+}
+.tabs {
+  display: flex; gap: 4px; padding: 20px 28px 0 28px; border-bottom: 1px solid #eee;
+}
+.tab-btn {
+  width: auto; background: none; color: #5C7A7E; font-weight: bold;
+  padding: 10px 16px; border-radius: 8px 8px 0 0; margin: 0;
+}
+.tab-btn.active { background: #EAF6F5; color: #028090; }
+.tab-content { padding: 24px 28px 28px 28px; }
+.tab-pane { display: none; }
+.tab-pane.visible { display: block; }
+.stats-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 20px; }
+.stat-card { background: #EAF6F5; border-radius: 10px; padding: 16px; text-align: center; }
+.stat-card span { display: block; font-size: 26px; font-weight: bold; color: #028090; }
+.stat-card label { font-size: 12px; color: #5C7A7E; }
+.chart-box { max-width: 500px; }
+.video-box {
+  background: #013E45; border-radius: 10px; min-height: 280px;
+  display: flex; align-items: center; justify-content: center; padding: 16px;
+}
+.video-box img { max-width: 100%; border-radius: 6px; }
+.video-box p { color: #BFE3E1; text-align: center; }
+.placeholder-note { color: #5C7A7E; font-style: italic; }

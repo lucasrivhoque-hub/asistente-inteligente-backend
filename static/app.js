@@ -1,11 +1,23 @@
 const API = "";
 let token = null;
+let rolActual = null;
+let intervaloVideo = null;
+let graficoAlertas = null;
+
+const TABS_POR_ROL = {
+  administrador: ["resumen", "video", "alertas", "dispositivos", "config"],
+  operador: ["resumen", "video", "alertas"],
+  tecnico: ["dispositivos", "config"],
+};
+const NOMBRES_TAB = {
+  resumen: "Resumen", video: "Video en vivo", alertas: "Alertas",
+  dispositivos: "Dispositivos", config: "Configuración",
+};
 
 function mostrarRegistro() {
   document.getElementById("login-view").classList.add("hidden");
   document.getElementById("registro-view").classList.remove("hidden");
 }
-
 function mostrarLogin() {
   document.getElementById("registro-view").classList.add("hidden");
   document.getElementById("login-view").classList.remove("hidden");
@@ -20,28 +32,19 @@ async function registrarUsuario() {
   const okMsg = document.getElementById("registro-ok-msg");
   errorMsg.textContent = "";
   okMsg.textContent = "";
-
-  if (!nombre || !email || !password) {
-    errorMsg.textContent = "Completa todos los campos";
-    return;
-  }
+  if (!nombre || !email || !password) { errorMsg.textContent = "Completa todos los campos"; return; }
 
   const res = await fetch(`${API}/usuarios/registro`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ nombre, email, password, rol_nombre }),
   });
-
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
     errorMsg.textContent = data.detail || "No se pudo crear la cuenta";
     return;
   }
-
   okMsg.textContent = "Cuenta creada. Ya puedes iniciar sesión.";
-  document.getElementById("reg-nombre").value = "";
-  document.getElementById("reg-email").value = "";
-  document.getElementById("reg-password").value = "";
   setTimeout(mostrarLogin, 1200);
 }
 
@@ -56,20 +59,16 @@ async function iniciarSesion() {
   body.append("password", password);
 
   const res = await fetch(`${API}/login`, { method: "POST", body });
-  if (!res.ok) {
-    errorMsg.textContent = "Email o contraseña incorrectos";
-    return;
-  }
+  if (!res.ok) { errorMsg.textContent = "Email o contraseña incorrectos"; return; }
   const data = await res.json();
   token = data.access_token;
   await cargarDashboard();
 }
 
 async function cargarDashboard() {
-  const res = await fetch(`${API}/usuarios/me`, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
+  const res = await fetch(`${API}/usuarios/me`, { headers: { Authorization: `Bearer ${token}` } });
   const usuario = await res.json();
+  rolActual = usuario.rol;
 
   document.getElementById("login-view").classList.add("hidden");
   document.getElementById("registro-view").classList.add("hidden");
@@ -77,20 +76,75 @@ async function cargarDashboard() {
   document.getElementById("saludo").textContent = `Hola, ${usuario.nombre}`;
   document.getElementById("rol-badge").textContent = usuario.rol;
 
-  if (usuario.rol === "administrador" || usuario.rol === "operador") {
-    document.getElementById("seccion-alertas").classList.remove("hidden");
-    cargarAlertas();
-  }
-  if (usuario.rol === "administrador" || usuario.rol === "tecnico") {
-    document.getElementById("seccion-dispositivos").classList.remove("hidden");
-    cargarDispositivos();
-  }
+  construirTabs(usuario.rol);
+}
+
+function construirTabs(rol) {
+  const tabs = TABS_POR_ROL[rol] || [];
+  const cont = document.getElementById("tabs");
+  cont.innerHTML = tabs.map((t, i) =>
+    `<button class="tab-btn ${i === 0 ? "active" : ""}" data-tab="${t}" onclick="cambiarTab('${t}')">${NOMBRES_TAB[t]}</button>`
+  ).join("");
+  tabs.forEach((t, i) => cambiarTab(t, i === 0));
+}
+
+function cambiarTab(nombre, silencioso) {
+  document.querySelectorAll(".tab-btn").forEach(b => b.classList.toggle("active", b.dataset.tab === nombre));
+  document.querySelectorAll(".tab-pane").forEach(p => p.classList.remove("visible"));
+  document.getElementById(`tab-${nombre}`).classList.add("visible");
+
+  if (intervaloVideo) { clearInterval(intervaloVideo); intervaloVideo = null; }
+
+  if (nombre === "resumen") cargarResumen();
+  if (nombre === "video") iniciarVideo();
+  if (nombre === "alertas") cargarAlertas();
+  if (nombre === "dispositivos") cargarDispositivos();
+}
+
+async function cargarResumen() {
+  const res = await fetch(`${API}/estadisticas`, { headers: { Authorization: `Bearer ${token}` } });
+  const stats = await res.json();
+  document.getElementById("stat-alertas").textContent = stats.total_alertas;
+  document.getElementById("stat-dispositivos").textContent = `${stats.dispositivos_activos}/${stats.total_dispositivos}`;
+  document.getElementById("stat-actividad").textContent = stats.ultima_actividad
+    ? new Date(stats.ultima_actividad).toLocaleString() : "Sin actividad";
+
+  const resAlertas = await fetch(`${API}/alertas`, { headers: { Authorization: `Bearer ${token}` } });
+  const alertas = await resAlertas.json();
+  const conteo = {};
+  alertas.forEach(a => { conteo[a.tipo] = (conteo[a.tipo] || 0) + 1; });
+
+  const ctx = document.getElementById("grafico-alertas");
+  if (graficoAlertas) graficoAlertas.destroy();
+  graficoAlertas = new Chart(ctx, {
+    type: "bar",
+    data: {
+      labels: Object.keys(conteo),
+      datasets: [{ label: "Alertas por tipo", data: Object.values(conteo), backgroundColor: "#028090" }],
+    },
+    options: { responsive: true, plugins: { legend: { display: false } } },
+  });
+}
+
+function iniciarVideo() {
+  const img = document.getElementById("video-frame");
+  const placeholder = document.getElementById("video-placeholder");
+  intervaloVideo = setInterval(async () => {
+    const res = await fetch(`${API}/video/ultimo-frame`, { headers: { Authorization: `Bearer ${token}` } });
+    const data = await res.json();
+    if (data.frame) {
+      img.src = `data:image/jpeg;base64,${data.frame}`;
+      img.classList.remove("hidden");
+      placeholder.classList.add("hidden");
+    } else {
+      img.classList.add("hidden");
+      placeholder.classList.remove("hidden");
+    }
+  }, 1000);
 }
 
 async function cargarAlertas() {
-  const res = await fetch(`${API}/alertas`, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
+  const res = await fetch(`${API}/alertas`, { headers: { Authorization: `Bearer ${token}` } });
   const alertas = await res.json();
   const cont = document.getElementById("lista-alertas");
   cont.innerHTML = alertas.length
@@ -99,9 +153,7 @@ async function cargarAlertas() {
 }
 
 async function cargarDispositivos() {
-  const res = await fetch(`${API}/dispositivos`, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
+  const res = await fetch(`${API}/dispositivos`, { headers: { Authorization: `Bearer ${token}` } });
   const dispositivos = await res.json();
   const cont = document.getElementById("lista-dispositivos");
   cont.innerHTML = dispositivos.length
@@ -111,6 +163,7 @@ async function cargarDispositivos() {
 
 function cerrarSesion() {
   token = null;
+  if (intervaloVideo) clearInterval(intervaloVideo);
   document.getElementById("dashboard-view").classList.add("hidden");
   document.getElementById("login-view").classList.remove("hidden");
   document.getElementById("email").value = "";
