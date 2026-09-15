@@ -14,6 +14,24 @@
   <input type="password" id="password" placeholder="Contraseña">
   <button onclick="iniciarSesion()">Ingresar</button>
   <p id="error-msg" class="error"></p>
+  <p class="switch-link">¿No tienes cuenta? <a onclick="mostrarRegistro()">Regístrate</a></p>
+</div>
+
+<div id="registro-view" class="card hidden">
+  <h1>Crear Cuenta</h1>
+  <p class="subtitle">Registro de nuevo usuario</p>
+  <input type="text" id="reg-nombre" placeholder="Nombre completo">
+  <input type="email" id="reg-email" placeholder="Email">
+  <input type="password" id="reg-password" placeholder="Contraseña">
+  <select id="reg-rol">
+    <option value="administrador">Administrador</option>
+    <option value="operador">Operador</option>
+    <option value="tecnico">Servicio técnico</option>
+  </select>
+  <button onclick="registrarUsuario()">Crear cuenta</button>
+  <p id="registro-error-msg" class="error"></p>
+  <p id="registro-ok-msg" class="ok"></p>
+  <p class="switch-link">¿Ya tienes cuenta? <a onclick="mostrarLogin()">Inicia sesión</a></p>
 </div>
 
 <div id="dashboard-view" class="card hidden">

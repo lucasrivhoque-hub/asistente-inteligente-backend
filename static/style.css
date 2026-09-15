@@ -54,3 +54,14 @@ button:hover { background: #026070; }
   margin-bottom: 8px;
   font-size: 14px;
 }
+select {
+  width: 100%;
+  padding: 12px;
+  margin: 8px 0;
+  border: 1px solid #ccc;
+  border-radius: 8px;
+  background: white;
+}
+.switch-link { font-size: 13px; margin-top: 14px; text-align: center; }
+.switch-link a { color: #028090; cursor: pointer; font-weight: bold; }
+.ok { color: #1e8449; }

@@ -1,6 +1,50 @@
 const API = "";
 let token = null;
 
+function mostrarRegistro() {
+  document.getElementById("login-view").classList.add("hidden");
+  document.getElementById("registro-view").classList.remove("hidden");
+}
+
+function mostrarLogin() {
+  document.getElementById("registro-view").classList.add("hidden");
+  document.getElementById("login-view").classList.remove("hidden");
+}
+
+async function registrarUsuario() {
+  const nombre = document.getElementById("reg-nombre").value;
+  const email = document.getElementById("reg-email").value;
+  const password = document.getElementById("reg-password").value;
+  const rol_nombre = document.getElementById("reg-rol").value;
+  const errorMsg = document.getElementById("registro-error-msg");
+  const okMsg = document.getElementById("registro-ok-msg");
+  errorMsg.textContent = "";
+  okMsg.textContent = "";
+
+  if (!nombre || !email || !password) {
+    errorMsg.textContent = "Completa todos los campos";
+    return;
+  }
+
+  const res = await fetch(`${API}/usuarios/registro`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ nombre, email, password, rol_nombre }),
+  });
+
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    errorMsg.textContent = data.detail || "No se pudo crear la cuenta";
+    return;
+  }
+
+  okMsg.textContent = "Cuenta creada. Ya puedes iniciar sesión.";
+  document.getElementById("reg-nombre").value = "";
+  document.getElementById("reg-email").value = "";
+  document.getElementById("reg-password").value = "";
+  setTimeout(mostrarLogin, 1200);
+}
+
 async function iniciarSesion() {
   const email = document.getElementById("email").value;
   const password = document.getElementById("password").value;
@@ -28,6 +72,7 @@ async function cargarDashboard() {
   const usuario = await res.json();
 
   document.getElementById("login-view").classList.add("hidden");
+  document.getElementById("registro-view").classList.add("hidden");
   document.getElementById("dashboard-view").classList.remove("hidden");
   document.getElementById("saludo").textContent = `Hola, ${usuario.nombre}`;
   document.getElementById("rol-badge").textContent = usuario.rol;
