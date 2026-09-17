@@ -116,6 +116,10 @@ class Token(BaseModel):
     access_token: str
     token_type: str
 
+class DispositivoCrear(BaseModel):
+    nombre: str
+    identificador_sdk: str | None = None
+
 # --- Funciones de seguridad ---
 def crear_token(data: dict):
     to_encode = data.copy()
@@ -190,6 +194,13 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
 def leer_usuario_actual(usuario: Usuario = Depends(usuario_actual)):
     return {"id": usuario.id, "nombre": usuario.nombre, "email": usuario.email, "rol": usuario.rol.nombre}
 
+@app.get("/usuarios")
+def listar_usuarios(usuario: Usuario = Depends(usuario_actual), db: Session = Depends(get_db)):
+    if usuario.rol.nombre != "administrador":
+        raise HTTPException(status_code=403, detail="No autorizado")
+    usuarios = db.query(Usuario).all()
+    return [{"id": u.id, "nombre": u.nombre, "email": u.email, "rol": u.rol.nombre} for u in usuarios]
+
 @app.get("/alertas")
 def listar_alertas(usuario: Usuario = Depends(usuario_actual), db: Session = Depends(get_db)):
     alertas = db.query(Alerta).order_by(Alerta.timestamp.desc()).limit(50).all()
@@ -202,6 +213,23 @@ def listar_alertas(usuario: Usuario = Depends(usuario_actual), db: Session = Dep
 def listar_dispositivos(usuario: Usuario = Depends(usuario_actual), db: Session = Depends(get_db)):
     dispositivos = db.query(Dispositivo).all()
     return [{"id": d.id, "nombre": d.nombre, "activo": d.activo} for d in dispositivos]
+
+@app.post("/dispositivos")
+def crear_dispositivo(datos: DispositivoCrear, usuario: Usuario = Depends(usuario_actual), db: Session = Depends(get_db)):
+    nuevo = Dispositivo(nombre=datos.nombre, identificador_sdk=datos.identificador_sdk, activo=True)
+    db.add(nuevo)
+    db.commit()
+    db.refresh(nuevo)
+    return {"mensaje": "Dispositivo registrado", "id": nuevo.id}
+
+@app.patch("/dispositivos/{dispositivo_id}/estado")
+def cambiar_estado_dispositivo(dispositivo_id: int, usuario: Usuario = Depends(usuario_actual), db: Session = Depends(get_db)):
+    dispositivo = db.query(Dispositivo).filter(Dispositivo.id == dispositivo_id).first()
+    if not dispositivo:
+        raise HTTPException(status_code=404, detail="Dispositivo no encontrado")
+    dispositivo.activo = not dispositivo.activo
+    db.commit()
+    return {"id": dispositivo.id, "activo": dispositivo.activo}
 
 @app.get("/video/ultimo-frame")
 def obtener_ultimo_frame(usuario: Usuario = Depends(usuario_actual)):

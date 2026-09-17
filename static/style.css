@@ -102,3 +102,12 @@ select {
 .video-box img { max-width: 100%; border-radius: 6px; }
 .video-box p { color: #BFE3E1; text-align: center; }
 .placeholder-note { color: #5C7A7E; font-style: italic; }
+
+.form-inline { display: flex; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }
+.form-inline input { flex: 1; min-width: 160px; margin: 0; }
+.form-inline button { width: auto; margin: 0; padding: 12px 18px; }
+.item-row { display: flex; justify-content: space-between; align-items: center; }
+.mini-btn { width: auto; padding: 6px 12px; font-size: 12px; background: #5C7A7E; }
+.tabla { width: 100%; border-collapse: collapse; margin-top: 10px; }
+.tabla th, .tabla td { text-align: left; padding: 8px; border-bottom: 1px solid #eee; font-size: 13px; }
+.tabla th { color: #5C7A7E; }

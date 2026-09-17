@@ -75,8 +75,18 @@
     </section>
 
     <section id="tab-config" class="tab-pane">
-      <h3>Configuración y diagnóstico</h3>
-      <p class="placeholder-note">Próximamente: umbrales de alerta, reinicio remoto de sesión, y registro detallado de errores por dispositivo.</p>
+      <h3>Registrar nuevo dispositivo</h3>
+      <div class="form-inline">
+        <input type="text" id="disp-nombre" placeholder="Nombre (ej. Ray-Ban Meta Gen 2)">
+        <input type="text" id="disp-sdk" placeholder="Identificador SDK (opcional)">
+        <button onclick="registrarDispositivo()">Registrar</button>
+      </div>
+      <p id="disp-msg"></p>
+
+      <div id="seccion-usuarios" class="hidden">
+        <h3>Usuarios registrados</h3>
+        <table class="tabla" id="tabla-usuarios"></table>
+      </div>
     </section>
   </div>
 </div>

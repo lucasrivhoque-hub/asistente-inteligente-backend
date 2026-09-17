@@ -88,7 +88,7 @@ function construirTabs(rol) {
   tabs.forEach((t, i) => cambiarTab(t, i === 0));
 }
 
-function cambiarTab(nombre, silencioso) {
+function cambiarTab(nombre) {
   document.querySelectorAll(".tab-btn").forEach(b => b.classList.toggle("active", b.dataset.tab === nombre));
   document.querySelectorAll(".tab-pane").forEach(p => p.classList.remove("visible"));
   document.getElementById(`tab-${nombre}`).classList.add("visible");
@@ -99,6 +99,7 @@ function cambiarTab(nombre, silencioso) {
   if (nombre === "video") iniciarVideo();
   if (nombre === "alertas") cargarAlertas();
   if (nombre === "dispositivos") cargarDispositivos();
+  if (nombre === "config") cargarConfig();
 }
 
 async function cargarResumen() {
@@ -157,8 +158,58 @@ async function cargarDispositivos() {
   const dispositivos = await res.json();
   const cont = document.getElementById("lista-dispositivos");
   cont.innerHTML = dispositivos.length
-    ? dispositivos.map(d => `<div class="item"><b>${d.nombre}</b> — ${d.activo ? "Activo" : "Inactivo"}</div>`).join("")
+    ? dispositivos.map(d => `
+        <div class="item item-row">
+          <div><b>${d.nombre}</b> — ${d.activo ? "Activo" : "Inactivo"}</div>
+          <button class="mini-btn" onclick="toggleDispositivo(${d.id})">${d.activo ? "Desactivar" : "Activar"}</button>
+        </div>`).join("")
     : "<p>Sin dispositivos registrados todavía.</p>";
+}
+
+async function toggleDispositivo(id) {
+  await fetch(`${API}/dispositivos/${id}/estado`, {
+    method: "PATCH",
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  cargarDispositivos();
+}
+
+async function registrarDispositivo() {
+  const nombre = document.getElementById("disp-nombre").value;
+  const identificador_sdk = document.getElementById("disp-sdk").value || null;
+  const msg = document.getElementById("disp-msg");
+  msg.textContent = "";
+  if (!nombre) { msg.textContent = "Escribe un nombre para el dispositivo"; msg.className = "error"; return; }
+
+  const res = await fetch(`${API}/dispositivos`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ nombre, identificador_sdk }),
+  });
+  if (!res.ok) { msg.textContent = "No se pudo registrar el dispositivo"; msg.className = "error"; return; }
+  msg.textContent = "Dispositivo registrado correctamente";
+  msg.className = "ok";
+  document.getElementById("disp-nombre").value = "";
+  document.getElementById("disp-sdk").value = "";
+}
+
+async function cargarConfig() {
+  document.getElementById("disp-msg").textContent = "";
+  if (rolActual === "administrador") {
+    document.getElementById("seccion-usuarios").classList.remove("hidden");
+    cargarUsuarios();
+  }
+}
+
+async function cargarUsuarios() {
+  const res = await fetch(`${API}/usuarios`, { headers: { Authorization: `Bearer ${token}` } });
+  if (!res.ok) return;
+  const usuarios = await res.json();
+  const tabla = document.getElementById("tabla-usuarios");
+  tabla.innerHTML = `
+    <tr><th>Nombre</th><th>Email</th><th>Rol</th></tr>
+    ${usuarios.map(u => `<tr><td>${u.nombre}</td><td>${u.email}</td><td>${u.rol}</td></tr>`).join("")}
+  `;
 }
 
 function cerrarSesion() {
