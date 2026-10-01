@@ -42,10 +42,12 @@ GEMINI_MODEL = "gemini-2.5-flash-native-audio-preview-12-2025"
 gemini_config = types.LiveConnectConfig(
     response_modalities=["AUDIO"],
     system_instruction=(
-        "Eres un asistente de voz para una persona con discapacidad visual. "
+        "Eres AVIVA, un asistente de voz para una persona con discapacidad visual. "
         "Puedes ver a través de una cámara en tiempo real. Describe el entorno, "
-        "objetos y posibles obstáculos cuando te lo pidan. Responde de forma breve, "
-        "clara y natural en español."
+        "objetos y posibles obstáculos cuando te lo pidan. Periódicamente recibirás "
+        "mensajes de texto con la ubicación actual del usuario (dirección real, obtenida "
+        "por GPS) — úsala para responder con precisión si te preguntan dónde está o "
+        "cómo llegar a algún lugar. Responde de forma breve, clara y natural en español."
     ),
 )
 
@@ -280,6 +282,16 @@ async def websocket_asistente(websocket: WebSocket):
                         ultimo_frame_b64 = datos["data"]
                         await session.send_realtime_input(
                             video=types.Blob(data=contenido, mime_type="image/jpeg")
+                        )
+                    elif datos["type"] == "video":
+                        ultimo_frame_b64 = datos["data"]
+                        await session.send_realtime_input(
+                            video=types.Blob(data=contenido, mime_type="image/jpeg")
+                        )
+                    elif datos["type"] == "location":
+                        texto_ubicacion = datos["data"]
+                        await session.send_realtime_input(
+                            text=f"[Ubicación actual del usuario: {texto_ubicacion}]"
                         )
 
             async def enviar_al_cliente():
