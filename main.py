@@ -39,12 +39,33 @@ os.environ["GOOGLE_API_KEY"] = os.environ.get("GEMINI_API_KEY")
 gemini_client = genai.Client()
 GEMINI_MODEL = "gemini-2.5-flash-native-audio-preview-12-2025"
 
+HERRAMIENTA_VER_ENTORNO = types.Tool(
+    function_declarations=[
+        types.FunctionDeclaration(
+            name="ver_entorno",
+            description=(
+                "Toma una foto ACTUAL con la cámara de los lentes del usuario. "
+                "Llámala cada vez que el usuario pida que describas lo que tiene enfrente "
+                "o alrededor, que le avises de obstáculos, que leas un texto o cartel, "
+                "o cualquier cosa que requiera ver."
+            ),
+        )
+    ]
+)
+
 gemini_config = types.LiveConnectConfig(
     response_modalities=["AUDIO"],
+    tools=[HERRAMIENTA_VER_ENTORNO],
     system_instruction=(
         "Eres AVIVA, un asistente de voz para una persona con discapacidad visual. "
-        "Puedes ver a través de una cámara en tiempo real cuando está disponible. "
-        "Describe el entorno, objetos y posibles obstáculos cuando te lo pidan. "
+        "Tus ojos son la cámara de sus lentes, pero solo ves cuando llamas a la herramienta "
+        "ver_entorno. Cuando el usuario te pida ver, describir el entorno, detectar obstáculos "
+        "o leer algo, SIEMPRE llama primero a ver_entorno para obtener una foto actual y espera "
+        "su resultado antes de responder. Mientras esperas puedes decir brevemente 'un momento, miro'. "
+        "Nunca describas imágenes anteriores como si fueran actuales. Si la herramienta indica un "
+        "error, dile al usuario con claridad que no puedes ver en este momento. "
+        "Si recibes imágenes automáticas sin haberlas pedido (modo caminata), úsalas solo como "
+        "contexto y no hables de ellas a menos que el usuario pregunte o haya un peligro inmediato. "
         "Durante la conversación recibirás mensajes de texto que empiezan con [CONTEXTO DEL SISTEMA]. "
         "Son datos reales del GPS del usuario (su ubicación actual). NO los leas en voz alta ni "
         "los comentes por iniciativa propia: úsalos únicamente cuando el usuario pregunte dónde está, "
@@ -266,7 +287,7 @@ def texto_contexto_ubicacion(direccion: str) -> str:
 async def websocket_asistente(websocket: WebSocket):
     await websocket.accept()
     db = SessionLocal()
-    estado = {"cliente_activo": True}
+    estado = {"cliente_activo": True, "foto_pendiente": None}
 
     # Una sola alerta por conexión del cliente (no una por cada reconexión a Gemini)
     db.add(Alerta(tipo="sesion", descripcion="Sesión de asistente iniciada",
@@ -294,10 +315,18 @@ async def websocket_asistente(websocket: WebSocket):
                                 audio=types.Blob(data=base64.b64decode(dato), mime_type="audio/pcm;rate=16000")
                             )
                         elif tipo == "video":
+                            # Imagen automática (modo caminata)
                             ultimo_frame_b64 = dato
                             await session.send_realtime_input(
                                 video=types.Blob(data=base64.b64decode(dato), mime_type="image/jpeg")
                             )
+                        elif tipo in ("foto", "foto_error"):
+                            # Respuesta a una solicitud de foto hecha por la herramienta ver_entorno
+                            if tipo == "foto":
+                                ultimo_frame_b64 = dato
+                            futuro = estado["foto_pendiente"]
+                            if futuro is not None and not futuro.done():
+                                futuro.set_result((tipo, dato))
                         elif tipo == "location":
                             # La ubicación llega como texto plano (NO es base64)
                             ultima_ubicacion = dato
@@ -307,9 +336,50 @@ async def websocket_asistente(websocket: WebSocket):
                     estado["cliente_activo"] = False
                     raise
 
+            async def atender_ver_entorno(llamada):
+                print("AVIVA pidió la herramienta ver_entorno: solicitando foto a la app...")
+                futuro = asyncio.get_running_loop().create_future()
+                estado["foto_pendiente"] = futuro
+                await websocket.send_text(json.dumps({"type": "capture_request"}))
+                try:
+                    tipo, dato = await asyncio.wait_for(futuro, timeout=8)
+                except asyncio.TimeoutError:
+                    tipo, dato = "foto_error", "La cámara tardó demasiado en responder"
+                finally:
+                    estado["foto_pendiente"] = None
+
+                if tipo == "foto":
+                    print("Foto recibida de la app; entregándola a AVIVA")
+                    await session.send_realtime_input(
+                        video=types.Blob(data=base64.b64decode(dato), mime_type="image/jpeg")
+                    )
+                    resultado = {"resultado": "Foto actual recibida. Ya puedes verla; descríbela al usuario."}
+                else:
+                    print(f"No se obtuvo foto: {dato}")
+                    resultado = {"error": f"No se pudo tomar la foto: {dato}. Dile al usuario que no puedes ver en este momento."}
+
+                await session.send_tool_response(
+                    function_responses=[
+                        types.FunctionResponse(id=llamada.id, name=llamada.name, response=resultado)
+                    ]
+                )
+
             async def enviar_al_cliente():
                 while True:
                     async for respuesta in session.receive():
+                        if respuesta.tool_call:
+                            for llamada in respuesta.tool_call.function_calls:
+                                if llamada.name == "ver_entorno":
+                                    await atender_ver_entorno(llamada)
+                                else:
+                                    await session.send_tool_response(
+                                        function_responses=[
+                                            types.FunctionResponse(
+                                                id=llamada.id, name=llamada.name,
+                                                response={"error": "Herramienta desconocida"},
+                                            )
+                                        ]
+                                    )
                         if respuesta.data:
                             audio_b64 = base64.b64encode(respuesta.data).decode("utf-8")
                             await websocket.send_text(json.dumps({"type": "audio", "data": audio_b64}))
