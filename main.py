@@ -43,11 +43,15 @@ gemini_config = types.LiveConnectConfig(
     response_modalities=["AUDIO"],
     system_instruction=(
         "Eres AVIVA, un asistente de voz para una persona con discapacidad visual. "
-        "Puedes ver a través de una cámara en tiempo real. Describe el entorno, "
-        "objetos y posibles obstáculos cuando te lo pidan. Periódicamente recibirás "
-        "mensajes de texto con la ubicación actual del usuario (dirección real, obtenida "
-        "por GPS) — úsala para responder con precisión si te preguntan dónde está o "
-        "cómo llegar a algún lugar. Responde de forma breve, clara y natural en español."
+        "Puedes ver a través de una cámara en tiempo real cuando está disponible. "
+        "Describe el entorno, objetos y posibles obstáculos cuando te lo pidan. "
+        "Durante la conversación recibirás mensajes de texto que empiezan con [CONTEXTO DEL SISTEMA]. "
+        "Son datos reales del GPS del usuario (su ubicación actual). NO los leas en voz alta ni "
+        "los comentes por iniciativa propia: úsalos únicamente cuando el usuario pregunte dónde está, "
+        "por su dirección, o cómo llegar a algún lugar. Cuando pregunte dónde está, responde con la "
+        "dirección más reciente que recibiste. Si todavía no has recibido ninguna ubicación, di que "
+        "aún no tienes la ubicación y NUNCA inventes ni adivines una. "
+        "Responde de forma breve, clara y natural en español."
     ),
 )
 
@@ -146,8 +150,9 @@ def usuario_actual(token: str = Depends(oauth2_scheme), db: Session = Depends(ge
         raise credenciales_invalidas
     return usuario
 
-# --- Estado del video en vivo (último frame recibido) ---
+# --- Estado compartido ---
 ultimo_frame_b64 = None
+ultima_ubicacion = None
 
 # --- API ---
 app = FastAPI(title="Asistente Inteligente API")
@@ -250,49 +255,57 @@ def obtener_estadisticas(usuario: Usuario = Depends(usuario_actual), db: Session
         "ultima_actividad": ultima_alerta.timestamp.isoformat() if ultima_alerta else None,
     }
 
+def texto_contexto_ubicacion(direccion: str) -> str:
+    return (
+        "[CONTEXTO DEL SISTEMA - no lo leas en voz alta] "
+        f"Ubicación actual del usuario según su GPS: {direccion}"
+    )
+
 # --- WebSocket: sesión en vivo con el asistente de IA ---
 @app.websocket("/ws/asistente")
 async def websocket_asistente(websocket: WebSocket):
     await websocket.accept()
     db = SessionLocal()
+    estado = {"cliente_activo": True}
+
+    # Una sola alerta por conexión del cliente (no una por cada reconexión a Gemini)
+    db.add(Alerta(tipo="sesion", descripcion="Sesión de asistente iniciada",
+                  usuario_id=None, dispositivo_id=None))
+    db.commit()
 
     async def manejar_sesion():
         async with gemini_client.aio.live.connect(model=GEMINI_MODEL, config=gemini_config) as session:
 
-            nueva_alerta = Alerta(
-                tipo="sesion",
-                descripcion="Sesión de asistente iniciada",
-                usuario_id=None,
-                dispositivo_id=None,
-            )
-            db.add(nueva_alerta)
-            db.commit()
+            # Si ya conocemos la ubicación (p. ej. tras una reconexión), se la reenviamos
+            if ultima_ubicacion:
+                await session.send_realtime_input(text=texto_contexto_ubicacion(ultima_ubicacion))
 
             async def recibir_del_cliente():
-                global ultimo_frame_b64
-                while True:
-                    mensaje = await websocket.receive_text()
-                    datos = json.loads(mensaje)
-                    contenido = base64.b64decode(datos["data"])
-                    if datos["type"] == "audio":
-                        await session.send_realtime_input(
-                            audio=types.Blob(data=contenido, mime_type="audio/pcm;rate=16000")
-                        )
-                    elif datos["type"] == "video":
-                        ultimo_frame_b64 = datos["data"]
-                        await session.send_realtime_input(
-                            video=types.Blob(data=contenido, mime_type="image/jpeg")
-                        )
-                    elif datos["type"] == "video":
-                        ultimo_frame_b64 = datos["data"]
-                        await session.send_realtime_input(
-                            video=types.Blob(data=contenido, mime_type="image/jpeg")
-                        )
-                    elif datos["type"] == "location":
-                        texto_ubicacion = datos["data"]
-                        await session.send_realtime_input(
-                            text=f"[Ubicación actual del usuario: {texto_ubicacion}]"
-                        )
+                global ultimo_frame_b64, ultima_ubicacion
+                try:
+                    while True:
+                        mensaje = await websocket.receive_text()
+                        datos = json.loads(mensaje)
+                        tipo = datos.get("type")
+                        dato = datos.get("data", "")
+
+                        if tipo == "audio":
+                            await session.send_realtime_input(
+                                audio=types.Blob(data=base64.b64decode(dato), mime_type="audio/pcm;rate=16000")
+                            )
+                        elif tipo == "video":
+                            ultimo_frame_b64 = dato
+                            await session.send_realtime_input(
+                                video=types.Blob(data=base64.b64decode(dato), mime_type="image/jpeg")
+                            )
+                        elif tipo == "location":
+                            # La ubicación llega como texto plano (NO es base64)
+                            ultima_ubicacion = dato
+                            print(f"Ubicación recibida: {dato}")
+                            await session.send_realtime_input(text=texto_contexto_ubicacion(dato))
+                except WebSocketDisconnect:
+                    estado["cliente_activo"] = False
+                    raise
 
             async def enviar_al_cliente():
                 while True:
@@ -301,20 +314,29 @@ async def websocket_asistente(websocket: WebSocket):
                             audio_b64 = base64.b64encode(respuesta.data).decode("utf-8")
                             await websocket.send_text(json.dumps({"type": "audio", "data": audio_b64}))
 
-            await asyncio.gather(recibir_del_cliente(), enviar_al_cliente())
+            tareas = [
+                asyncio.create_task(recibir_del_cliente()),
+                asyncio.create_task(enviar_al_cliente()),
+            ]
+            hechas, pendientes = await asyncio.wait(tareas, return_when=asyncio.FIRST_EXCEPTION)
+            for t in pendientes:
+                t.cancel()
+            for t in hechas:
+                if t.exception():
+                    raise t.exception()
 
     try:
-        while True:
+        while estado["cliente_activo"]:
             try:
                 await manejar_sesion()
             except Exception as e:
+                if not estado["cliente_activo"]:
+                    break
                 print(f"Sesión con Gemini interrumpida, reconectando... ({e})")
                 await asyncio.sleep(1)
-                continue
-    except WebSocketDisconnect:
-        print("Cliente desconectado del asistente")
     finally:
         db.close()
+        print("Cliente desconectado del asistente")
 
 # --- Archivos estáticos: interfaz web ---
 app.mount("/app", StaticFiles(directory="static", html=True), name="static")
