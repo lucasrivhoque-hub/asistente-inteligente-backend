@@ -49,6 +49,19 @@ HERRAMIENTA_VER_ENTORNO = types.Tool(
                 "o alrededor, que le avises de obstáculos, que leas un texto o cartel, "
                 "o cualquier cosa que requiera ver."
             ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "detalle": {
+                        "type": "boolean",
+                        "description": (
+                            "true si hay que leer texto, carteles, etiquetas, precios, pantallas "
+                            "o distinguir detalles pequeños (usa una foto de alta resolución, "
+                            "más lenta). false para una vista general rápida del entorno u obstáculos."
+                        ),
+                    }
+                },
+            },
         )
     ]
 )
@@ -62,6 +75,10 @@ gemini_config = types.LiveConnectConfig(
         "ver_entorno. Cuando el usuario te pida ver, describir el entorno, detectar obstáculos "
         "o leer algo, SIEMPRE llama primero a ver_entorno para obtener una foto actual y espera "
         "su resultado antes de responder. Mientras esperas puedes decir brevemente 'un momento, miro'. "
+        "Si te piden leer texto, carteles, etiquetas, precios o pantallas, o ver detalles pequeños, "
+        "llama a ver_entorno con detalle=true y pídele que acerque el texto y se quede quieto unos "
+        "segundos; para descripciones generales u obstáculos usa detalle=false. Si no logras leer "
+        "algo con claridad, dilo y pídele que se acerque en vez de adivinar. "
         "Nunca describas imágenes anteriores como si fueran actuales. Si la herramienta indica un "
         "error, dile al usuario con claridad que no puedes ver en este momento. "
         "Si recibes imágenes automáticas sin haberlas pedido (modo caminata), úsalas solo como "
@@ -339,12 +356,13 @@ async def websocket_asistente(websocket: WebSocket):
             async def atender_ver_entorno(llamada):
                 reloj = asyncio.get_running_loop()
                 inicio = reloj.time()
-                print("AVIVA pidió la herramienta ver_entorno: solicitando foto a la app...")
+                detalle = bool((llamada.args or {}).get("detalle", False))
+                print(f"AVIVA pidió ver_entorno (detalle={detalle}): solicitando foto a la app...")
                 futuro = reloj.create_future()
                 estado["foto_pendiente"] = futuro
-                await websocket.send_text(json.dumps({"type": "capture_request"}))
+                await websocket.send_text(json.dumps({"type": "capture_request", "detalle": detalle}))
                 try:
-                    tipo, dato = await asyncio.wait_for(futuro, timeout=20)
+                    tipo, dato = await asyncio.wait_for(futuro, timeout=25)
                 except asyncio.TimeoutError:
                     tipo, dato = "foto_error", "La cámara tardó demasiado en responder"
                 finally:
