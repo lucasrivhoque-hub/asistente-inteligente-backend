@@ -337,16 +337,20 @@ async def websocket_asistente(websocket: WebSocket):
                     raise
 
             async def atender_ver_entorno(llamada):
+                reloj = asyncio.get_running_loop()
+                inicio = reloj.time()
                 print("AVIVA pidió la herramienta ver_entorno: solicitando foto a la app...")
-                futuro = asyncio.get_running_loop().create_future()
+                futuro = reloj.create_future()
                 estado["foto_pendiente"] = futuro
                 await websocket.send_text(json.dumps({"type": "capture_request"}))
                 try:
-                    tipo, dato = await asyncio.wait_for(futuro, timeout=8)
+                    tipo, dato = await asyncio.wait_for(futuro, timeout=20)
                 except asyncio.TimeoutError:
                     tipo, dato = "foto_error", "La cámara tardó demasiado en responder"
                 finally:
                     estado["foto_pendiente"] = None
+
+                print(f"Respuesta de la app en {reloj.time() - inicio:.1f} s (tipo: {tipo})")
 
                 if tipo == "foto":
                     print("Foto recibida de la app; entregándola a AVIVA")
