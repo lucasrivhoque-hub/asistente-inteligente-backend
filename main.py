@@ -1,11 +1,13 @@
 import asyncio
 import base64
 import json
+import math
 import os
 from dotenv import load_dotenv
 load_dotenv()
 from datetime import datetime, timedelta
 
+import httpx
 from fastapi import (
     FastAPI, Depends, HTTPException, status, WebSocket, WebSocketDisconnect
 )
@@ -34,12 +36,15 @@ ACCESS_TOKEN_EXPIRE_MINUTES = 60
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
 
+# --- Google Maps ---
+GOOGLE_MAPS_API_KEY = os.environ.get("GOOGLE_MAPS_API_KEY")
+
 # --- Gemini Live ---
 os.environ["GOOGLE_API_KEY"] = os.environ.get("GEMINI_API_KEY")
 gemini_client = genai.Client()
 GEMINI_MODEL = "gemini-2.5-flash-native-audio-preview-12-2025"
 
-HERRAMIENTA_VER_ENTORNO = types.Tool(
+HERRAMIENTAS_AVIVA = types.Tool(
     function_declarations=[
         types.FunctionDeclaration(
             name="ver_entorno",
@@ -62,13 +67,43 @@ HERRAMIENTA_VER_ENTORNO = types.Tool(
                     }
                 },
             },
-        )
+        ),
+        types.FunctionDeclaration(
+            name="obtener_ruta",
+            description=(
+                "Calcula una ruta A PIE desde la ubicación actual del usuario hasta un destino "
+                "y devuelve distancia, tiempo e indicaciones. Llámala cuando el usuario pida "
+                "ir o llegar a un lugar, o pregunte cómo llegar."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "destino": {
+                        "type": "string",
+                        "description": (
+                            "Nombre o dirección del destino incluyendo la ciudad, "
+                            "por ejemplo 'Plaza 14 de Septiembre, Cochabamba, Bolivia'."
+                        ),
+                    }
+                },
+                "required": ["destino"],
+            },
+        ),
+        types.FunctionDeclaration(
+            name="siguiente_indicacion",
+            description=(
+                "Indica qué debe hacer el usuario ahora en la ruta activa, según su posición "
+                "actual: cuántos metros faltan para la siguiente indicación y cuál es. "
+                "Llámala cuando el usuario pregunte '¿ahora qué hago?', 'siguiente', "
+                "'¿voy bien?' o cuánto falta."
+            ),
+        ),
     ]
 )
 
 gemini_config = types.LiveConnectConfig(
     response_modalities=["AUDIO"],
-    tools=[HERRAMIENTA_VER_ENTORNO],
+    tools=[HERRAMIENTAS_AVIVA],
     system_instruction=(
         "Eres AVIVA, un asistente de voz para una persona con discapacidad visual. "
         "Tus ojos son la cámara de sus lentes, pero solo ves cuando llamas a la herramienta "
@@ -83,12 +118,19 @@ gemini_config = types.LiveConnectConfig(
         "error, dile al usuario con claridad que no puedes ver en este momento. "
         "Si recibes imágenes automáticas sin haberlas pedido (modo caminata), úsalas solo como "
         "contexto y no hables de ellas a menos que el usuario pregunte o haya un peligro inmediato. "
+        "Cuando el usuario pida ir o llegar a un lugar, llama a obtener_ruta con el destino "
+        "(agrega la ciudad, por ejemplo 'Cochabamba, Bolivia', si no la mencionó). Luego dile en una "
+        "frase la distancia y el tiempo aproximado, y SOLO la primera indicación. Mientras camina, "
+        "cuando pregunte qué hacer ahora, si va bien o cuánto falta, llama a siguiente_indicacion. "
+        "Usa únicamente lo que devuelvan las herramientas: nunca inventes calles, giros ni distancias. "
+        "Es una ruta peatonal basada en mapas y GPS; recuérdale con naturalidad (no en cada mensaje) "
+        "que preste atención al cruzar calles y que esto no reemplaza su bastón. "
         "Durante la conversación recibirás mensajes de texto que empiezan con [CONTEXTO DEL SISTEMA]. "
         "Son datos reales del GPS del usuario (su ubicación actual). NO los leas en voz alta ni "
         "los comentes por iniciativa propia: úsalos únicamente cuando el usuario pregunte dónde está, "
         "por su dirección, o cómo llegar a algún lugar. Cuando pregunte dónde está, responde con la "
-        "dirección más reciente que recibiste. Si todavía no has recibido ninguna ubicación, di que "
-        "aún no tienes la ubicación y NUNCA inventes ni adivines una. "
+        "calle o dirección más reciente que recibiste, sin leer las coordenadas. Si todavía no has "
+        "recibido ninguna ubicación, di que aún no tienes la ubicación y NUNCA inventes ni adivines una. "
         "Responde de forma breve, clara y natural en español."
     ),
 )
@@ -188,9 +230,143 @@ def usuario_actual(token: str = Depends(oauth2_scheme), db: Session = Depends(ge
         raise credenciales_invalidas
     return usuario
 
-# --- Estado compartido ---
+# --- Estado compartido (prototipo de un solo usuario a la vez) ---
 ultimo_frame_b64 = None
-ultima_ubicacion = None
+ultima_ubicacion = None          # texto con la dirección, para dárselo a Gemini
+ultima_lat = None
+ultima_lng = None
+punto_geocodificado = None       # (lat, lng) de la última consulta a Geocoding
+direccion_geocodificada = None
+ruta_activa = {"ruta": None}     # ruta que se está siguiendo
+
+# --- Utilidades de mapas ---
+def distancia_metros(lat1, lon1, lat2, lon2):
+    radio = 6371000
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dp = p2 - p1
+    dl = math.radians(lon2 - lon1)
+    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return 2 * radio * math.asin(math.sqrt(a))
+
+async def geocodificar_inverso(lat, lng):
+    """Devuelve la dirección (calle) de unas coordenadas, o None si falla."""
+    if not GOOGLE_MAPS_API_KEY:
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=8) as cliente:
+            r = await cliente.get(
+                "https://maps.googleapis.com/maps/api/geocode/json",
+                params={"latlng": f"{lat},{lng}", "language": "es", "key": GOOGLE_MAPS_API_KEY},
+            )
+            datos = r.json()
+        if datos.get("status") == "OK" and datos.get("results"):
+            resultados = datos["results"]
+            preferido = next(
+                (x for x in resultados
+                 if "street_address" in x.get("types", []) or "route" in x.get("types", [])),
+                resultados[0],
+            )
+            return preferido["formatted_address"]
+        print(f"Geocoding sin resultado: {datos.get('status')} {datos.get('error_message', '')}")
+    except Exception as e:
+        print(f"Error en geocodificación inversa: {e}")
+    return None
+
+async def calcular_ruta_peatonal(lat, lng, destino):
+    """Pide a Google Routes una ruta a pie. Devuelve un dict para Gemini (con '_ruta' interna)."""
+    if not GOOGLE_MAPS_API_KEY:
+        return {"error": "El servicio de mapas no está configurado en el servidor"}
+    cuerpo = {
+        "origin": {"location": {"latLng": {"latitude": lat, "longitude": lng}}},
+        "destination": {"address": destino},
+        "travelMode": "WALK",
+        "languageCode": "es",
+        "units": "METRIC",
+    }
+    cabeceras = {
+        "Content-Type": "application/json",
+        "X-Goog-Api-Key": GOOGLE_MAPS_API_KEY,
+        "X-Goog-FieldMask": (
+            "routes.duration,routes.distanceMeters,"
+            "routes.legs.steps.navigationInstruction,"
+            "routes.legs.steps.distanceMeters,"
+            "routes.legs.steps.endLocation"
+        ),
+    }
+    try:
+        async with httpx.AsyncClient(timeout=10) as cliente:
+            r = await cliente.post(
+                "https://routes.googleapis.com/directions/v2:computeRoutes",
+                headers=cabeceras, json=cuerpo,
+            )
+            datos = r.json()
+    except Exception as e:
+        print(f"Error consultando Routes API: {e}")
+        return {"error": "No se pudo consultar el servicio de mapas"}
+
+    if r.status_code != 200 or not datos.get("routes"):
+        mensaje = ""
+        if isinstance(datos, dict):
+            mensaje = (datos.get("error") or {}).get("message", "")
+        print(f"Routes API sin ruta (HTTP {r.status_code}): {mensaje}")
+        return {"error": "No encontré una ruta a pie hacia ese destino"}
+
+    ruta = datos["routes"][0]
+    pasos = []
+    for tramo in ruta.get("legs", []):
+        for paso in tramo.get("steps", []):
+            texto = (paso.get("navigationInstruction") or {}).get("instructions")
+            fin = (paso.get("endLocation") or {}).get("latLng") or {}
+            if texto and "latitude" in fin and "longitude" in fin:
+                pasos.append({
+                    "texto": texto,
+                    "metros": int(paso.get("distanceMeters", 0)),
+                    "fin": (fin["latitude"], fin["longitude"]),
+                })
+    if not pasos:
+        return {"error": "La ruta no trae indicaciones paso a paso"}
+
+    segundos = int(str(ruta.get("duration", "0s")).rstrip("s") or 0)
+    print(f"Ruta calculada hacia '{destino}': {ruta.get('distanceMeters', 0)} m, {len(pasos)} indicaciones")
+    return {
+        "destino": destino,
+        "distancia_metros": ruta.get("distanceMeters", 0),
+        "duracion_minutos": max(1, round(segundos / 60)),
+        "total_indicaciones": len(pasos),
+        "primera_indicacion": pasos[0]["texto"],
+        "metros_de_la_primera_etapa": pasos[0]["metros"],
+        "resumen_de_indicaciones": [p["texto"] for p in pasos[:12]],
+        "_ruta": {"destino": destino, "pasos": pasos, "indice": 0},
+    }
+
+def indicacion_actual():
+    """Dice dónde va el usuario en la ruta activa según su última ubicación."""
+    ruta = ruta_activa["ruta"]
+    if not ruta:
+        return {"error": "No hay una ruta activa. Pregúntale a dónde quiere ir."}
+    if ultima_lat is None or ultima_lng is None:
+        return {"error": "Aún no tengo la ubicación actual del usuario"}
+
+    pasos = ruta["pasos"]
+    i = ruta["indice"]
+    # Avanza de etapa cuando el usuario llega (a menos de 25 m) al final de la actual
+    while i < len(pasos) - 1 and distancia_metros(ultima_lat, ultima_lng, *pasos[i]["fin"]) < 25:
+        i += 1
+    ruta["indice"] = i
+
+    restante = round(distancia_metros(ultima_lat, ultima_lng, *pasos[i]["fin"]))
+    es_ultima = i == len(pasos) - 1
+    if es_ultima and restante < 25:
+        return {"llego_al_destino": True, "destino": ruta["destino"]}
+    return {
+        "destino": ruta["destino"],
+        "etapa_actual": f"{i + 1} de {len(pasos)}",
+        "indicacion_que_ya_cumple": pasos[i]["texto"],
+        "metros_hasta_el_siguiente_cambio": restante,
+        "siguiente_indicacion": (
+            "Has llegado al destino" if es_ultima else pasos[i + 1]["texto"]
+        ),
+    }
 
 # --- API ---
 app = FastAPI(title="Asistente Inteligente API")
@@ -304,7 +480,7 @@ def texto_contexto_ubicacion(direccion: str) -> str:
 async def websocket_asistente(websocket: WebSocket):
     await websocket.accept()
     db = SessionLocal()
-    estado = {"cliente_activo": True, "foto_pendiente": None}
+    estado = {"cliente_activo": True, "foto_pendiente": None, "direccion_enviada": None}
 
     # Una sola alerta por conexión del cliente (no una por cada reconexión a Gemini)
     db.add(Alerta(tipo="sesion", descripcion="Sesión de asistente iniciada",
@@ -318,8 +494,42 @@ async def websocket_asistente(websocket: WebSocket):
             if ultima_ubicacion:
                 await session.send_realtime_input(text=texto_contexto_ubicacion(ultima_ubicacion))
 
+            async def procesar_ubicacion(texto_app, lat, lng):
+                global ultima_ubicacion, ultima_lat, ultima_lng
+                global punto_geocodificado, direccion_geocodificada
+
+                direccion = None
+                if lat is not None and lng is not None:
+                    ultima_lat, ultima_lng = float(lat), float(lng)
+                    # Solo consultamos Geocoding si el usuario se movió más de 25 m
+                    se_movio = (
+                        punto_geocodificado is None
+                        or distancia_metros(ultima_lat, ultima_lng, *punto_geocodificado) > 25
+                    )
+                    if se_movio:
+                        direccion = await geocodificar_inverso(ultima_lat, ultima_lng)
+                        if direccion:
+                            punto_geocodificado = (ultima_lat, ultima_lng)
+                            direccion_geocodificada = direccion
+                    else:
+                        direccion = direccion_geocodificada
+
+                direccion = direccion or texto_app
+                if not direccion:
+                    return
+                if ultima_lat is not None:
+                    ultima_ubicacion = f"{direccion} (coordenadas {ultima_lat:.5f}, {ultima_lng:.5f})"
+                else:
+                    ultima_ubicacion = direccion
+
+                # Solo avisamos a Gemini cuando la dirección cambia
+                if direccion != estado["direccion_enviada"]:
+                    estado["direccion_enviada"] = direccion
+                    print(f"Ubicación: {ultima_ubicacion}")
+                    await session.send_realtime_input(text=texto_contexto_ubicacion(ultima_ubicacion))
+
             async def recibir_del_cliente():
-                global ultimo_frame_b64, ultima_ubicacion
+                global ultimo_frame_b64
                 try:
                     while True:
                         mensaje = await websocket.receive_text()
@@ -345,13 +555,18 @@ async def websocket_asistente(websocket: WebSocket):
                             if futuro is not None and not futuro.done():
                                 futuro.set_result((tipo, dato))
                         elif tipo == "location":
-                            # La ubicación llega como texto plano (NO es base64)
-                            ultima_ubicacion = dato
-                            print(f"Ubicación recibida: {dato}")
-                            await session.send_realtime_input(text=texto_contexto_ubicacion(dato))
+                            # 'data' es texto plano (NO base64); lat y lng son números
+                            await procesar_ubicacion(dato, datos.get("lat"), datos.get("lng"))
                 except WebSocketDisconnect:
                     estado["cliente_activo"] = False
                     raise
+
+            async def responder_herramienta(llamada, resultado):
+                await session.send_tool_response(
+                    function_responses=[
+                        types.FunctionResponse(id=llamada.id, name=llamada.name, response=resultado)
+                    ]
+                )
 
             async def atender_ver_entorno(llamada):
                 reloj = asyncio.get_running_loop()
@@ -380,11 +595,21 @@ async def websocket_asistente(websocket: WebSocket):
                     print(f"No se obtuvo foto: {dato}")
                     resultado = {"error": f"No se pudo tomar la foto: {dato}. Dile al usuario que no puedes ver en este momento."}
 
-                await session.send_tool_response(
-                    function_responses=[
-                        types.FunctionResponse(id=llamada.id, name=llamada.name, response=resultado)
-                    ]
-                )
+                await responder_herramienta(llamada, resultado)
+
+            async def atender_obtener_ruta(llamada):
+                destino = str((llamada.args or {}).get("destino", "")).strip()
+                print(f"AVIVA pidió obtener_ruta hacia: '{destino}'")
+                if not destino:
+                    resultado = {"error": "Falta el destino"}
+                elif ultima_lat is None or ultima_lng is None:
+                    resultado = {"error": "Aún no tengo la ubicación actual del usuario; espera unos segundos"}
+                else:
+                    resultado = await calcular_ruta_peatonal(ultima_lat, ultima_lng, destino)
+                    ruta_interna = resultado.pop("_ruta", None)
+                    if ruta_interna:
+                        ruta_activa["ruta"] = ruta_interna
+                await responder_herramienta(llamada, resultado)
 
             async def enviar_al_cliente():
                 while True:
@@ -393,15 +618,13 @@ async def websocket_asistente(websocket: WebSocket):
                             for llamada in respuesta.tool_call.function_calls:
                                 if llamada.name == "ver_entorno":
                                     await atender_ver_entorno(llamada)
+                                elif llamada.name == "obtener_ruta":
+                                    await atender_obtener_ruta(llamada)
+                                elif llamada.name == "siguiente_indicacion":
+                                    print("AVIVA pidió siguiente_indicacion")
+                                    await responder_herramienta(llamada, indicacion_actual())
                                 else:
-                                    await session.send_tool_response(
-                                        function_responses=[
-                                            types.FunctionResponse(
-                                                id=llamada.id, name=llamada.name,
-                                                response={"error": "Herramienta desconocida"},
-                                            )
-                                        ]
-                                    )
+                                    await responder_herramienta(llamada, {"error": "Herramienta desconocida"})
                         if respuesta.data:
                             audio_b64 = base64.b64encode(respuesta.data).decode("utf-8")
                             await websocket.send_text(json.dumps({"type": "audio", "data": audio_b64}))
