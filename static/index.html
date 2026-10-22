@@ -2,93 +2,154 @@
 <html lang="es">
 <head>
 <meta charset="UTF-8">
-<title>Asistente Inteligente</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AVIVA · Panel de control</title>
 <link rel="stylesheet" href="style.css">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
 </head>
 <body>
 
-<div id="login-view" class="card">
-  <h1>Asistente Inteligente</h1>
-  <p class="subtitle">Inicia sesión</p>
-  <input type="email" id="email" placeholder="Email">
-  <input type="password" id="password" placeholder="Contraseña">
-  <button onclick="iniciarSesion()">Ingresar</button>
-  <p id="error-msg" class="error"></p>
-  <p class="switch-link">¿No tienes cuenta? <a onclick="mostrarRegistro()">Regístrate</a></p>
-</div>
-
-<div id="registro-view" class="card hidden">
-  <h1>Crear Cuenta</h1>
-  <p class="subtitle">Registro de nuevo usuario</p>
-  <input type="text" id="reg-nombre" placeholder="Nombre completo">
-  <input type="email" id="reg-email" placeholder="Email">
-  <input type="password" id="reg-password" placeholder="Contraseña">
-  <select id="reg-rol">
-    <option value="administrador">Administrador</option>
-    <option value="operador">Operador</option>
-    <option value="tecnico">Servicio técnico</option>
-  </select>
-  <button onclick="registrarUsuario()">Crear cuenta</button>
-  <p id="registro-error-msg" class="error"></p>
-  <p id="registro-ok-msg" class="ok"></p>
-  <p class="switch-link">¿Ya tienes cuenta? <a onclick="mostrarLogin()">Inicia sesión</a></p>
-</div>
-
-<div id="dashboard-view" class="dashboard hidden">
-  <div class="topbar">
-    <div>
-      <h2 id="saludo"></h2>
-      <span id="rol-badge" class="badge"></span>
+<!-- ============ ACCESO ============ -->
+<div id="auth-view" class="auth">
+  <div class="auth-brand">
+    <div class="brand-row"><span class="logo-dot"></span><span class="brand-name">AVIVA</span></div>
+    <h1>Asistente inteligente de movilidad</h1>
+    <p>Descripción del entorno, lectura de texto y guía de rutas por voz para personas con discapacidad visual.</p>
+    <div class="brand-points">
+      <div>Visión por inteligencia artificial en tiempo real</div>
+      <div>Rutas a pie con indicaciones en español</div>
+      <div>Monitoreo remoto con acceso por roles</div>
     </div>
-    <button class="logout" onclick="cerrarSesion()">Salir</button>
   </div>
 
-  <div class="tabs" id="tabs"></div>
+  <div class="auth-forms">
+    <div id="login-view" class="auth-card">
+      <h2>Iniciar sesión</h2>
+      <p class="sub">Accede al panel de control de AVIVA.</p>
+      <label>Correo electrónico</label>
+      <input type="email" id="email" placeholder="correo@ejemplo.com">
+      <label>Contraseña</label>
+      <input type="password" id="password" placeholder="••••••••">
+      <button class="btn" onclick="iniciarSesion()">Ingresar</button>
+      <p id="error-msg" class="error"></p>
+      <p class="switch-link">¿No tienes cuenta? <a onclick="mostrarRegistro()">Regístrate</a></p>
+    </div>
 
-  <div class="tab-content">
-    <section id="tab-resumen" class="tab-pane">
+    <div id="registro-view" class="auth-card hidden">
+      <h2>Crear cuenta</h2>
+      <p class="sub">Registro de un nuevo usuario del sistema.</p>
+      <label>Nombre completo</label>
+      <input type="text" id="reg-nombre" placeholder="Nombre y apellido">
+      <label>Correo electrónico</label>
+      <input type="email" id="reg-email" placeholder="correo@ejemplo.com">
+      <label>Contraseña</label>
+      <input type="password" id="reg-password" placeholder="Mínimo 8 caracteres">
+      <label>Rol</label>
+      <select id="reg-rol">
+        <option value="administrador">Administrador</option>
+        <option value="operador">Operador</option>
+        <option value="tecnico">Servicio técnico</option>
+      </select>
+      <button class="btn" onclick="registrarUsuario()">Crear cuenta</button>
+      <p id="registro-error-msg" class="error"></p>
+      <p id="registro-ok-msg" class="ok"></p>
+      <p class="switch-link">¿Ya tienes cuenta? <a onclick="mostrarLogin()">Inicia sesión</a></p>
+    </div>
+  </div>
+</div>
+
+<!-- ============ APLICACIÓN ============ -->
+<div id="app-view" class="shell hidden">
+  <aside class="sidebar">
+    <div class="brand-row"><span class="logo-dot"></span><span class="brand-name">AVIVA</span></div>
+    <nav id="nav" class="nav"></nav>
+    <div class="user-box">
+      <div class="avatar" id="avatar">A</div>
+      <div class="user-meta">
+        <strong id="saludo"></strong>
+        <span id="rol-badge" class="badge"></span>
+      </div>
+      <button class="btn-ghost" onclick="cerrarSesion()">Salir</button>
+    </div>
+  </aside>
+
+  <main class="main">
+    <header class="topbar">
+      <div>
+        <h2 id="titulo-seccion"></h2>
+        <p id="subtitulo-seccion" class="sub"></p>
+      </div>
+    </header>
+
+    <!-- Resumen -->
+    <section id="tab-resumen" class="pane">
       <div class="stats-grid">
-        <div class="stat-card"><span id="stat-alertas">–</span><label>Alertas totales</label></div>
-        <div class="stat-card"><span id="stat-dispositivos">–</span><label>Dispositivos</label></div>
-        <div class="stat-card"><span id="stat-actividad">–</span><label>Última actividad</label></div>
+        <div class="stat"><span class="stat-num" id="stat-consultas">–</span><span class="stat-lbl">Consultas a AVIVA</span></div>
+        <div class="stat"><span class="stat-num" id="stat-rutas">–</span><span class="stat-lbl">Rutas solicitadas</span></div>
+        <div class="stat"><span class="stat-num" id="stat-alertas">–</span><span class="stat-lbl">Alertas del sistema</span></div>
+        <div class="stat"><span class="stat-num" id="stat-dispositivos">–</span><span class="stat-lbl">Dispositivos activos</span></div>
       </div>
-      <div class="chart-box"><canvas id="grafico-alertas"></canvas></div>
-    </section>
-
-    <section id="tab-video" class="tab-pane">
-      <h3>Transmisión en vivo</h3>
-      <div class="video-box">
-        <img id="video-frame" class="hidden">
-        <p id="video-placeholder">Sin transmisión activa. Conecta el asistente para ver la cámara en vivo.</p>
+      <div class="card">
+        <h3>Actividad de los últimos 7 días</h3>
+        <div class="chart-wrap"><canvas id="grafico-actividad"></canvas></div>
+      </div>
+      <div class="card">
+        <h3>Estado del sistema</h3>
+        <p class="sub">Última actividad registrada: <b id="stat-actividad">–</b></p>
       </div>
     </section>
 
-    <section id="tab-alertas" class="tab-pane">
-      <h3>Alertas recientes</h3>
-      <div id="lista-alertas"></div>
-    </section>
-
-    <section id="tab-dispositivos" class="tab-pane">
-      <h3>Dispositivos</h3>
-      <div id="lista-dispositivos"></div>
-    </section>
-
-    <section id="tab-config" class="tab-pane">
-      <h3>Registrar nuevo dispositivo</h3>
-      <div class="form-inline">
-        <input type="text" id="disp-nombre" placeholder="Nombre (ej. Ray-Ban Meta Gen 2)">
-        <input type="text" id="disp-sdk" placeholder="Identificador SDK (opcional)">
-        <button onclick="registrarDispositivo()">Registrar</button>
+    <!-- Imágenes enviadas -->
+    <section id="tab-imagenes" class="pane">
+      <div class="card live-card">
+        <div class="live-img">
+          <img id="img-ultima" class="hidden" alt="Última imagen recibida">
+          <div id="img-ultima-vacio" class="vacio">Aún no se ha recibido ninguna imagen.</div>
+        </div>
+        <div class="live-info">
+          <h3>Última imagen recibida</h3>
+          <p id="img-ultima-hora" class="sub">—</p>
+          <p class="hint">Se actualiza automáticamente cada pocos segundos.</p>
+        </div>
       </div>
-      <p id="disp-msg"></p>
+      <h3 class="section-title">Historial de consultas con imagen</h3>
+      <div id="lista-imagenes" class="feed"></div>
+    </section>
 
-      <div id="seccion-usuarios" class="hidden">
+    <!-- Rutas -->
+    <section id="tab-rutas" class="pane">
+      <div class="card">
+        <table class="tabla" id="tabla-rutas"></table>
+      </div>
+    </section>
+
+    <!-- Alertas -->
+    <section id="tab-alertas" class="pane">
+      <div class="card"><div id="lista-alertas" class="list"></div></div>
+    </section>
+
+    <!-- Dispositivos -->
+    <section id="tab-dispositivos" class="pane">
+      <div class="card"><div id="lista-dispositivos" class="list"></div></div>
+    </section>
+
+    <!-- Configuración -->
+    <section id="tab-config" class="pane">
+      <div class="card">
+        <h3>Registrar nuevo dispositivo</h3>
+        <div class="form-inline">
+          <input type="text" id="disp-nombre" placeholder="Nombre (ej. Ray-Ban Meta Gen 1)">
+          <input type="text" id="disp-sdk" placeholder="Identificador SDK (opcional)">
+          <button class="btn" onclick="registrarDispositivo()">Registrar</button>
+        </div>
+        <p id="disp-msg"></p>
+      </div>
+      <div id="seccion-usuarios" class="card hidden">
         <h3>Usuarios registrados</h3>
         <table class="tabla" id="tabla-usuarios"></table>
       </div>
     </section>
-  </div>
+  </main>
 </div>
 
 <script src="app.js"></script>
