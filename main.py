@@ -3,17 +3,18 @@ import base64
 import json
 import math
 import os
+import time
 from dotenv import load_dotenv
 load_dotenv()
 from datetime import datetime, timedelta
 
 import httpx
 from fastapi import (
-    FastAPI, Depends, HTTPException, status, WebSocket, WebSocketDisconnect
+    FastAPI, Depends, HTTPException, status, WebSocket, WebSocketDisconnect, Response
 )
 from fastapi.staticfiles import StaticFiles
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
-from sqlalchemy import create_engine, Column, Integer, String, ForeignKey, DateTime, Boolean, Float
+from sqlalchemy import create_engine, Column, Integer, String, ForeignKey, DateTime, Boolean, Float, Text
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship, Session
 from passlib.context import CryptContext
 from jose import JWTError, jwt
@@ -31,7 +32,7 @@ Base = declarative_base()
 # --- Seguridad ---
 SECRET_KEY = "cambia-esto-por-una-clave-larga-y-secreta-propia"
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 60
+ACCESS_TOKEN_EXPIRE_MINUTES = 720
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
@@ -101,39 +102,57 @@ HERRAMIENTAS_AVIVA = types.Tool(
     ]
 )
 
-gemini_config = types.LiveConnectConfig(
-    response_modalities=["AUDIO"],
-    tools=[HERRAMIENTAS_AVIVA],
-    system_instruction=(
-        "Eres AVIVA, un asistente de voz para una persona con discapacidad visual. "
-        "Tus ojos son la cámara de sus lentes, pero solo ves cuando llamas a la herramienta "
-        "ver_entorno. Cuando el usuario te pida ver, describir el entorno, detectar obstáculos "
-        "o leer algo, SIEMPRE llama primero a ver_entorno para obtener una foto actual y espera "
-        "su resultado antes de responder. Mientras esperas puedes decir brevemente 'un momento, miro'. "
-        "Si te piden leer texto, carteles, etiquetas, precios o pantallas, o ver detalles pequeños, "
-        "llama a ver_entorno con detalle=true y pídele que acerque el texto y se quede quieto unos "
-        "segundos; para descripciones generales u obstáculos usa detalle=false. Si no logras leer "
-        "algo con claridad, dilo y pídele que se acerque en vez de adivinar. "
-        "Nunca describas imágenes anteriores como si fueran actuales. Si la herramienta indica un "
-        "error, dile al usuario con claridad que no puedes ver en este momento. "
-        "Si recibes imágenes automáticas sin haberlas pedido (modo caminata), úsalas solo como "
-        "contexto y no hables de ellas a menos que el usuario pregunte o haya un peligro inmediato. "
-        "Cuando el usuario pida ir o llegar a un lugar, llama a obtener_ruta con el destino "
-        "(agrega la ciudad, por ejemplo 'Cochabamba, Bolivia', si no la mencionó). Luego dile en una "
-        "frase la distancia y el tiempo aproximado, y SOLO la primera indicación. Mientras camina, "
-        "cuando pregunte qué hacer ahora, si va bien o cuánto falta, llama a siguiente_indicacion. "
-        "Usa únicamente lo que devuelvan las herramientas: nunca inventes calles, giros ni distancias. "
-        "Es una ruta peatonal basada en mapas y GPS; recuérdale con naturalidad (no en cada mensaje) "
-        "que preste atención al cruzar calles y que esto no reemplaza su bastón. "
-        "Durante la conversación recibirás mensajes de texto que empiezan con [CONTEXTO DEL SISTEMA]. "
-        "Son datos reales del GPS del usuario (su ubicación actual). NO los leas en voz alta ni "
-        "los comentes por iniciativa propia: úsalos únicamente cuando el usuario pregunte dónde está, "
-        "por su dirección, o cómo llegar a algún lugar. Cuando pregunte dónde está, responde con la "
-        "calle o dirección más reciente que recibiste, sin leer las coordenadas. Si todavía no has "
-        "recibido ninguna ubicación, di que aún no tienes la ubicación y NUNCA inventes ni adivines una. "
-        "Responde de forma breve, clara y natural en español."
-    ),
+INSTRUCCION_AVIVA = (
+    "Eres AVIVA, un asistente de voz para una persona con discapacidad visual. "
+    "Preséntate SOLO al inicio de la conversación. Si ya estás conversando con el usuario, "
+    "no vuelvas a saludar ni a presentarte, y continúa siempre desde lo que ya hablaron. "
+    "Tus ojos son la cámara de sus lentes, pero solo ves cuando llamas a la herramienta "
+    "ver_entorno. Antes de responder CUALQUIER pregunta sobre lo que hay enfrente, alrededor, "
+    "obstáculos o textos, llama SIEMPRE a ver_entorno, aunque creas que ya lo sabes por una imagen "
+    "anterior. Mientras esperas el resultado di ÚNICAMENTE 'Un momento, miro' y no describas ni "
+    "supongas nada. Solo describe lo que veas en la foto que recibas como resultado. "
+    "Si te piden leer texto, carteles, etiquetas, precios o pantallas, o ver detalles pequeños, "
+    "llama a ver_entorno con detalle=true y pídele que acerque el texto y se quede quieto unos "
+    "segundos; para descripciones generales u obstáculos usa detalle=false. Si no logras leer "
+    "algo con claridad, dilo y pídele que se acerque en vez de adivinar. "
+    "Nunca describas imágenes anteriores como si fueran actuales. Si la herramienta indica un "
+    "error, dile al usuario con claridad que no puedes ver en este momento. "
+    "Si recibes imágenes automáticas sin haberlas pedido (modo caminata), úsalas solo como "
+    "contexto y no hables de ellas a menos que el usuario pregunte o haya un peligro inmediato. "
+    "Cuando el usuario pida ir o llegar a un lugar, llama a obtener_ruta con el destino "
+    "(agrega la ciudad, por ejemplo 'Cochabamba, Bolivia', si no la mencionó). Luego dile en una "
+    "frase la distancia y el tiempo aproximado, y SOLO la primera indicación. Mientras camina, "
+    "cuando pregunte qué hacer ahora, si va bien o cuánto falta, llama a siguiente_indicacion. "
+    "Usa únicamente lo que devuelvan las herramientas: nunca inventes calles, giros ni distancias. "
+    "Es una ruta peatonal basada en mapas y GPS; recuérdale con naturalidad (no en cada mensaje) "
+    "que preste atención al cruzar calles y que esto no reemplaza su bastón. "
+    "Durante la conversación recibirás mensajes de texto que empiezan con [CONTEXTO DEL SISTEMA]. "
+    "Son datos reales del GPS del usuario (su ubicación actual). NO los leas en voz alta ni "
+    "los comentes por iniciativa propia: úsalos únicamente cuando el usuario pregunte dónde está, "
+    "por su dirección, o cómo llegar a algún lugar. Cuando pregunte dónde está, responde con la "
+    "calle o dirección más reciente que recibiste, sin leer las coordenadas. Si todavía no has "
+    "recibido ninguna ubicación, di que aún no tienes la ubicación y NUNCA inventes ni adivines una. "
+    "Responde de forma breve, clara y natural en español."
 )
+
+
+def crear_config(handle=None, avanzada=True):
+    """Configuración de la sesión con Gemini. 'avanzada' agrega transcripción,
+    compresión de contexto y reanudación de sesión."""
+    opciones = dict(
+        response_modalities=["AUDIO"],
+        tools=[HERRAMIENTAS_AVIVA],
+        system_instruction=INSTRUCCION_AVIVA,
+    )
+    if avanzada:
+        opciones["input_audio_transcription"] = types.AudioTranscriptionConfig()
+        opciones["output_audio_transcription"] = types.AudioTranscriptionConfig()
+        opciones["context_window_compression"] = types.ContextWindowCompressionConfig(
+            sliding_window=types.SlidingWindow()
+        )
+        opciones["session_resumption"] = types.SessionResumptionConfig(handle=handle)
+    return types.LiveConnectConfig(**opciones)
+
 
 # --- Modelos (tablas) ---
 class Rol(Base):
@@ -181,7 +200,61 @@ class Alerta(Base):
     usuario = relationship("Usuario")
     dispositivo = relationship("Dispositivo")
 
+class Interaccion(Base):
+    """Una consulta a AVIVA: lo que dijo el usuario, lo que respondió y la imagen enviada."""
+    __tablename__ = "interacciones"
+    id = Column(Integer, primary_key=True, index=True)
+    timestamp = Column(DateTime, default=datetime.utcnow)
+    pregunta = Column(Text, nullable=True)
+    respuesta = Column(Text, nullable=True)
+    imagen_b64 = Column(Text, nullable=True)
+    tiene_imagen = Column(Boolean, default=False)
+    detalle = Column(Boolean, default=False)
+
+class SolicitudRuta(Base):
+    """Cada vez que el usuario pide indicaciones hacia un lugar."""
+    __tablename__ = "solicitudes_ruta"
+    id = Column(Integer, primary_key=True, index=True)
+    timestamp = Column(DateTime, default=datetime.utcnow)
+    origen = Column(Text, nullable=True)
+    destino = Column(Text, nullable=False)
+    distancia_m = Column(Integer, nullable=True)
+    duracion_min = Column(Integer, nullable=True)
+    exito = Column(Boolean, default=False)
+    resumen = Column(Text, nullable=True)
+
 Base.metadata.create_all(bind=engine)
+
+def guardar_interaccion(pregunta, respuesta, imagen_b64, detalle):
+    db = SessionLocal()
+    try:
+        db.add(Interaccion(
+            pregunta=pregunta or None,
+            respuesta=respuesta or None,
+            imagen_b64=imagen_b64,
+            tiene_imagen=imagen_b64 is not None,
+            detalle=bool(detalle),
+        ))
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        print(f"No se pudo guardar la interacción: {e}")
+    finally:
+        db.close()
+
+def guardar_solicitud_ruta(origen, destino, distancia_m, duracion_min, exito, resumen):
+    db = SessionLocal()
+    try:
+        db.add(SolicitudRuta(
+            origen=origen, destino=destino, distancia_m=distancia_m,
+            duracion_min=duracion_min, exito=bool(exito), resumen=resumen,
+        ))
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        print(f"No se pudo guardar la solicitud de ruta: {e}")
+    finally:
+        db.close()
 
 # --- Utilidades de sesión de base de datos ---
 def get_db():
@@ -232,12 +305,13 @@ def usuario_actual(token: str = Depends(oauth2_scheme), db: Session = Depends(ge
 
 # --- Estado compartido (prototipo de un solo usuario a la vez) ---
 ultimo_frame_b64 = None
-ultima_ubicacion = None          # texto con la dirección, para dárselo a Gemini
+ultimo_frame_hora = None
+ultima_ubicacion = None
 ultima_lat = None
 ultima_lng = None
-punto_geocodificado = None       # (lat, lng) de la última consulta a Geocoding
+punto_geocodificado = None
 direccion_geocodificada = None
-ruta_activa = {"ruta": None}     # ruta que se está siguiendo
+ruta_activa = {"ruta": None}
 
 # --- Utilidades de mapas ---
 def distancia_metros(lat1, lon1, lat2, lon2):
@@ -349,7 +423,6 @@ def indicacion_actual():
 
     pasos = ruta["pasos"]
     i = ruta["indice"]
-    # Avanza de etapa cuando el usuario llega (a menos de 25 m) al final de la actual
     while i < len(pasos) - 1 and distancia_metros(ultima_lat, ultima_lng, *pasos[i]["fin"]) < 25:
         i += 1
     ruta["indice"] = i
@@ -454,7 +527,58 @@ def cambiar_estado_dispositivo(dispositivo_id: int, usuario: Usuario = Depends(u
 
 @app.get("/video/ultimo-frame")
 def obtener_ultimo_frame(usuario: Usuario = Depends(usuario_actual)):
-    return {"frame": ultimo_frame_b64}
+    return {"frame": ultimo_frame_b64, "hora": ultimo_frame_hora}
+
+@app.get("/interacciones")
+def listar_interacciones(
+    solo_imagenes: bool = False, limite: int = 30,
+    usuario: Usuario = Depends(usuario_actual), db: Session = Depends(get_db),
+):
+    consulta = db.query(Interaccion)
+    if solo_imagenes:
+        consulta = consulta.filter(Interaccion.tiene_imagen == True)
+    filas = consulta.order_by(Interaccion.timestamp.desc()).limit(min(limite, 100)).all()
+    return [
+        {
+            "id": f.id,
+            "timestamp": f.timestamp.isoformat(),
+            "pregunta": f.pregunta,
+            "respuesta": f.respuesta,
+            "tiene_imagen": bool(f.tiene_imagen),
+            "detalle": bool(f.detalle),
+        }
+        for f in filas
+    ]
+
+@app.get("/interacciones/{interaccion_id}/imagen")
+def imagen_de_interaccion(
+    interaccion_id: int,
+    usuario: Usuario = Depends(usuario_actual), db: Session = Depends(get_db),
+):
+    fila = db.query(Interaccion).filter(Interaccion.id == interaccion_id).first()
+    if not fila or not fila.imagen_b64:
+        raise HTTPException(status_code=404, detail="Imagen no encontrada")
+    return Response(content=base64.b64decode(fila.imagen_b64), media_type="image/jpeg")
+
+@app.get("/rutas/historial")
+def historial_rutas(
+    limite: int = 50,
+    usuario: Usuario = Depends(usuario_actual), db: Session = Depends(get_db),
+):
+    filas = db.query(SolicitudRuta).order_by(SolicitudRuta.timestamp.desc()).limit(min(limite, 200)).all()
+    return [
+        {
+            "id": f.id,
+            "timestamp": f.timestamp.isoformat(),
+            "origen": f.origen,
+            "destino": f.destino,
+            "distancia_m": f.distancia_m,
+            "duracion_min": f.duracion_min,
+            "exito": bool(f.exito),
+            "resumen": f.resumen,
+        }
+        for f in filas
+    ]
 
 @app.get("/estadisticas")
 def obtener_estadisticas(usuario: Usuario = Depends(usuario_actual), db: Session = Depends(get_db)):
@@ -466,6 +590,8 @@ def obtener_estadisticas(usuario: Usuario = Depends(usuario_actual), db: Session
         "total_alertas": total_alertas,
         "total_dispositivos": total_dispositivos,
         "dispositivos_activos": dispositivos_activos,
+        "total_consultas": db.query(Interaccion).count(),
+        "total_rutas": db.query(SolicitudRuta).count(),
         "ultima_actividad": ultima_alerta.timestamp.isoformat() if ultima_alerta else None,
     }
 
@@ -475,23 +601,34 @@ def texto_contexto_ubicacion(direccion: str) -> str:
         f"Ubicación actual del usuario según su GPS: {direccion}"
     )
 
+def turno_vacio():
+    return {"pregunta": "", "respuesta": "", "imagen": None, "detalle": False}
+
 # --- WebSocket: sesión en vivo con el asistente de IA ---
 @app.websocket("/ws/asistente")
 async def websocket_asistente(websocket: WebSocket):
     await websocket.accept()
     db = SessionLocal()
-    estado = {"cliente_activo": True, "foto_pendiente": None, "direccion_enviada": None}
+    estado = {
+        "cliente_activo": True,
+        "foto_pendiente": None,
+        "direccion_enviada": None,
+        "handle": None,                 # para reanudar la conversación con Gemini
+        "herramienta_en_curso": False,
+        "turno": turno_vacio(),
+    }
 
     # Una sola alerta por conexión del cliente (no una por cada reconexión a Gemini)
     db.add(Alerta(tipo="sesion", descripcion="Sesión de asistente iniciada",
                   usuario_id=None, dispositivo_id=None))
     db.commit()
 
-    async def manejar_sesion():
-        async with gemini_client.aio.live.connect(model=GEMINI_MODEL, config=gemini_config) as session:
+    async def manejar_sesion(config, reanudando):
+        async with gemini_client.aio.live.connect(model=GEMINI_MODEL, config=config) as session:
+            print(f"Sesión con Gemini abierta (reanudando conversación: {reanudando})")
 
-            # Si ya conocemos la ubicación (p. ej. tras una reconexión), se la reenviamos
-            if ultima_ubicacion:
+            # En una sesión nueva (no reanudada) damos la ubicación conocida
+            if ultima_ubicacion and not reanudando:
                 await session.send_realtime_input(text=texto_contexto_ubicacion(ultima_ubicacion))
 
             async def procesar_ubicacion(texto_app, lat, lng):
@@ -501,7 +638,6 @@ async def websocket_asistente(websocket: WebSocket):
                 direccion = None
                 if lat is not None and lng is not None:
                     ultima_lat, ultima_lng = float(lat), float(lng)
-                    # Solo consultamos Geocoding si el usuario se movió más de 25 m
                     se_movio = (
                         punto_geocodificado is None
                         or distancia_metros(ultima_lat, ultima_lng, *punto_geocodificado) > 25
@@ -522,14 +658,13 @@ async def websocket_asistente(websocket: WebSocket):
                 else:
                     ultima_ubicacion = direccion
 
-                # Solo avisamos a Gemini cuando la dirección cambia
                 if direccion != estado["direccion_enviada"]:
                     estado["direccion_enviada"] = direccion
                     print(f"Ubicación: {ultima_ubicacion}")
                     await session.send_realtime_input(text=texto_contexto_ubicacion(ultima_ubicacion))
 
             async def recibir_del_cliente():
-                global ultimo_frame_b64
+                global ultimo_frame_b64, ultimo_frame_hora
                 try:
                     while True:
                         mensaje = await websocket.receive_text()
@@ -544,18 +679,18 @@ async def websocket_asistente(websocket: WebSocket):
                         elif tipo == "video":
                             # Imagen automática (modo caminata)
                             ultimo_frame_b64 = dato
+                            ultimo_frame_hora = datetime.utcnow().isoformat()
                             await session.send_realtime_input(
                                 video=types.Blob(data=base64.b64decode(dato), mime_type="image/jpeg")
                             )
                         elif tipo in ("foto", "foto_error"):
-                            # Respuesta a una solicitud de foto hecha por la herramienta ver_entorno
                             if tipo == "foto":
                                 ultimo_frame_b64 = dato
+                                ultimo_frame_hora = datetime.utcnow().isoformat()
                             futuro = estado["foto_pendiente"]
                             if futuro is not None and not futuro.done():
                                 futuro.set_result((tipo, dato))
                         elif tipo == "location":
-                            # 'data' es texto plano (NO base64); lat y lng son números
                             await procesar_ubicacion(dato, datos.get("lat"), datos.get("lng"))
                 except WebSocketDisconnect:
                     estado["cliente_activo"] = False
@@ -586,11 +721,17 @@ async def websocket_asistente(websocket: WebSocket):
                 print(f"Respuesta de la app en {reloj.time() - inicio:.1f} s (tipo: {tipo})")
 
                 if tipo == "foto":
-                    print("Foto recibida de la app; entregándola a AVIVA")
+                    estado["turno"]["imagen"] = dato
+                    estado["turno"]["detalle"] = detalle
                     await session.send_realtime_input(
                         video=types.Blob(data=base64.b64decode(dato), mime_type="image/jpeg")
                     )
-                    resultado = {"resultado": "Foto actual recibida. Ya puedes verla; descríbela al usuario."}
+                    resultado = {
+                        "resultado": (
+                            "Esta es la foto ACTUAL que tomaron los lentes para la pregunta del usuario. "
+                            "Descríbela ahora, basándote solo en lo que se ve en ella."
+                        )
+                    }
                 else:
                     print(f"No se obtuvo foto: {dato}")
                     resultado = {"error": f"No se pudo tomar la foto: {dato}. Dile al usuario que no puedes ver en este momento."}
@@ -609,22 +750,71 @@ async def websocket_asistente(websocket: WebSocket):
                     ruta_interna = resultado.pop("_ruta", None)
                     if ruta_interna:
                         ruta_activa["ruta"] = ruta_interna
+                    resumen = None
+                    if ruta_interna:
+                        resumen = "\n".join(
+                            f"{n + 1}. {p['texto']}" for n, p in enumerate(ruta_interna["pasos"])
+                        )
+                    await asyncio.to_thread(
+                        guardar_solicitud_ruta,
+                        estado["direccion_enviada"] or ultima_ubicacion,
+                        destino,
+                        resultado.get("distancia_metros"),
+                        resultado.get("duracion_minutos"),
+                        "error" not in resultado,
+                        resumen,
+                    )
                 await responder_herramienta(llamada, resultado)
+
+            async def cerrar_turno():
+                # Si AVIVA está usando una herramienta, el turno todavía no terminó
+                if estado["herramienta_en_curso"]:
+                    return
+                turno = estado["turno"]
+                pregunta = turno["pregunta"].strip()
+                respuesta = turno["respuesta"].strip()
+                if pregunta or respuesta or turno["imagen"]:
+                    await asyncio.to_thread(
+                        guardar_interaccion, pregunta, respuesta, turno["imagen"], turno["detalle"]
+                    )
+                estado["turno"] = turno_vacio()
 
             async def enviar_al_cliente():
                 while True:
                     async for respuesta in session.receive():
+                        # Datos para reanudar la conversación si se corta la conexión
+                        if respuesta.session_resumption_update:
+                            actualizacion = respuesta.session_resumption_update
+                            if actualizacion.resumable and actualizacion.new_handle:
+                                estado["handle"] = actualizacion.new_handle
+                        if respuesta.go_away is not None:
+                            print(f"Gemini avisa que cerrará la sesión pronto (tiempo restante: {respuesta.go_away.time_left})")
+
                         if respuesta.tool_call:
-                            for llamada in respuesta.tool_call.function_calls:
-                                if llamada.name == "ver_entorno":
-                                    await atender_ver_entorno(llamada)
-                                elif llamada.name == "obtener_ruta":
-                                    await atender_obtener_ruta(llamada)
-                                elif llamada.name == "siguiente_indicacion":
-                                    print("AVIVA pidió siguiente_indicacion")
-                                    await responder_herramienta(llamada, indicacion_actual())
-                                else:
-                                    await responder_herramienta(llamada, {"error": "Herramienta desconocida"})
+                            estado["herramienta_en_curso"] = True
+                            try:
+                                for llamada in respuesta.tool_call.function_calls:
+                                    if llamada.name == "ver_entorno":
+                                        await atender_ver_entorno(llamada)
+                                    elif llamada.name == "obtener_ruta":
+                                        await atender_obtener_ruta(llamada)
+                                    elif llamada.name == "siguiente_indicacion":
+                                        print("AVIVA pidió siguiente_indicacion")
+                                        await responder_herramienta(llamada, indicacion_actual())
+                                    else:
+                                        await responder_herramienta(llamada, {"error": "Herramienta desconocida"})
+                            finally:
+                                estado["herramienta_en_curso"] = False
+
+                        contenido = respuesta.server_content
+                        if contenido:
+                            if contenido.input_transcription and contenido.input_transcription.text:
+                                estado["turno"]["pregunta"] += contenido.input_transcription.text
+                            if contenido.output_transcription and contenido.output_transcription.text:
+                                estado["turno"]["respuesta"] += contenido.output_transcription.text
+                            if contenido.turn_complete:
+                                await cerrar_turno()
+
                         if respuesta.data:
                             audio_b64 = base64.b64encode(respuesta.data).decode("utf-8")
                             await websocket.send_text(json.dumps({"type": "audio", "data": audio_b64}))
@@ -640,14 +830,28 @@ async def websocket_asistente(websocket: WebSocket):
                 if t.exception():
                     raise t.exception()
 
+    usar_avanzada = True
+    fallos_rapidos = 0
     try:
         while estado["cliente_activo"]:
+            inicio_sesion = time.time()
+            handle = estado["handle"] if usar_avanzada else None
             try:
-                await manejar_sesion()
+                await manejar_sesion(crear_config(handle, usar_avanzada), reanudando=handle is not None)
             except Exception as e:
                 if not estado["cliente_activo"]:
                     break
-                print(f"Sesión con Gemini interrumpida, reconectando... ({e})")
+                duracion = time.time() - inicio_sesion
+                print(f"Sesión con Gemini interrumpida tras {duracion:.0f} s, reconectando... ({e})")
+                if usar_avanzada and duracion < 5:
+                    # Falló al conectar: probamos sin el handle y, si se repite, con la configuración básica
+                    fallos_rapidos += 1
+                    estado["handle"] = None
+                    if fallos_rapidos >= 2:
+                        print("La configuración avanzada no fue aceptada; usando la configuración básica")
+                        usar_avanzada = False
+                else:
+                    fallos_rapidos = 0
                 await asyncio.sleep(1)
     finally:
         db.close()
