@@ -167,6 +167,41 @@
   </main>
 </div>
 
+<!-- ============ EDITOR DE USUARIO ============ -->
+<div id="modal-usuario" class="modal hidden">
+  <div class="modal-box">
+    <h3>Editar usuario</h3>
+    <input type="hidden" id="edit-id">
+
+    <label>Nombre completo</label>
+    <input type="text" id="edit-nombre">
+
+    <label>Correo electrónico</label>
+    <input type="email" id="edit-email">
+
+    <label>Rol</label>
+    <select id="edit-rol">
+      <option value="administrador">Administrador</option>
+      <option value="operador">Operador</option>
+      <option value="tecnico">Servicio técnico</option>
+    </select>
+
+    <label>Nueva contraseña (opcional)</label>
+    <div class="clave-row">
+      <input type="password" id="edit-password" placeholder="Déjala vacía para no cambiarla" autocomplete="new-password">
+      <button type="button" class="mini-btn" id="btn-ver-clave" onclick="alternarVerClave()">Mostrar</button>
+      <button type="button" class="mini-btn" onclick="generarClave()">Generar</button>
+    </div>
+    <p class="hint">Las contraseñas guardadas están cifradas y no se pueden ver ni recuperar. Aquí puedes asignar una nueva.</p>
+
+    <p id="edit-msg" class="error"></p>
+    <div class="modal-actions">
+      <button class="mini-btn" onclick="cerrarEditor()">Cancelar</button>
+      <button class="btn" onclick="guardarUsuario()">Guardar cambios</button>
+    </div>
+  </div>
+</div>
+
 <script src="app.js"></script>
 </body>
 </html>
