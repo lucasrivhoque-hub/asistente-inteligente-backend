@@ -14,8 +14,11 @@ from fastapi import (
 )
 from fastapi.staticfiles import StaticFiles
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
-from sqlalchemy import create_engine, Column, Integer, String, ForeignKey, DateTime, Boolean, Float, Text
-from sqlalchemy.orm import declarative_base, sessionmaker, relationship, Session
+from sqlalchemy import (
+    create_engine, Column, Integer, String, ForeignKey, DateTime, Boolean, Float, Text,
+    text as sql_text,
+)
+from sqlalchemy.orm import declarative_base, sessionmaker, relationship, Session, defer
 from passlib.context import CryptContext
 from jose import JWTError, jwt
 from pydantic import BaseModel
@@ -36,6 +39,8 @@ ACCESS_TOKEN_EXPIRE_MINUTES = 720
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
+
+ROLES_VALIDOS = {"administrador", "operador", "tecnico"}
 
 # --- Google Maps ---
 GOOGLE_MAPS_API_KEY = os.environ.get("GOOGLE_MAPS_API_KEY")
@@ -222,8 +227,18 @@ class SolicitudRuta(Base):
     duracion_min = Column(Integer, nullable=True)
     exito = Column(Boolean, default=False)
     resumen = Column(Text, nullable=True)
+    mapa_b64 = Column(Text, nullable=True)
+    tiene_mapa = Column(Boolean, default=False)
 
 Base.metadata.create_all(bind=engine)
+
+# Migración ligera: agrega las columnas del mapa si la tabla ya existía
+try:
+    with engine.begin() as conexion:
+        conexion.execute(sql_text("ALTER TABLE solicitudes_ruta ADD COLUMN IF NOT EXISTS mapa_b64 TEXT"))
+        conexion.execute(sql_text("ALTER TABLE solicitudes_ruta ADD COLUMN IF NOT EXISTS tiene_mapa BOOLEAN DEFAULT FALSE"))
+except Exception as e:
+    print(f"No se pudo actualizar la tabla solicitudes_ruta: {e}")
 
 def guardar_interaccion(pregunta, respuesta, imagen_b64, detalle):
     db = SessionLocal()
@@ -245,14 +260,32 @@ def guardar_interaccion(pregunta, respuesta, imagen_b64, detalle):
 def guardar_solicitud_ruta(origen, destino, distancia_m, duracion_min, exito, resumen):
     db = SessionLocal()
     try:
-        db.add(SolicitudRuta(
+        fila = SolicitudRuta(
             origen=origen, destino=destino, distancia_m=distancia_m,
             duracion_min=duracion_min, exito=bool(exito), resumen=resumen,
-        ))
+        )
+        db.add(fila)
         db.commit()
+        db.refresh(fila)
+        return fila.id
     except Exception as e:
         db.rollback()
         print(f"No se pudo guardar la solicitud de ruta: {e}")
+        return None
+    finally:
+        db.close()
+
+def guardar_mapa_ruta(solicitud_id, mapa_b64):
+    db = SessionLocal()
+    try:
+        fila = db.query(SolicitudRuta).filter(SolicitudRuta.id == solicitud_id).first()
+        if fila:
+            fila.mapa_b64 = mapa_b64
+            fila.tiene_mapa = True
+            db.commit()
+    except Exception as e:
+        db.rollback()
+        print(f"No se pudo guardar el mapa de la ruta: {e}")
     finally:
         db.close()
 
@@ -270,6 +303,12 @@ class UsuarioRegistro(BaseModel):
     email: str
     password: str
     rol_nombre: str
+
+class UsuarioEditar(BaseModel):
+    nombre: str | None = None
+    email: str | None = None
+    rol_nombre: str | None = None
+    password: str | None = None
 
 class Token(BaseModel):
     access_token: str
@@ -312,6 +351,8 @@ ultima_lng = None
 punto_geocodificado = None
 direccion_geocodificada = None
 ruta_activa = {"ruta": None}
+sesiones_activas = {"n": 0}
+tareas_fondo = set()
 
 # --- Utilidades de mapas ---
 def distancia_metros(lat1, lon1, lat2, lon2):
@@ -321,6 +362,28 @@ def distancia_metros(lat1, lon1, lat2, lon2):
     dl = math.radians(lon2 - lon1)
     a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
     return 2 * radio * math.asin(math.sqrt(a))
+
+def decodificar_polyline(codificado):
+    """Convierte una polilínea codificada de Google en una lista de (lat, lng)."""
+    puntos = []
+    indice, lat, lng = 0, 0, 0
+    while indice < len(codificado):
+        for es_lat in (True, False):
+            resultado, desplazamiento = 0, 0
+            while True:
+                b = ord(codificado[indice]) - 63
+                indice += 1
+                resultado |= (b & 0x1F) << desplazamiento
+                desplazamiento += 5
+                if b < 0x20:
+                    break
+            delta = ~(resultado >> 1) if resultado & 1 else resultado >> 1
+            if es_lat:
+                lat += delta
+            else:
+                lng += delta
+        puntos.append((lat / 1e5, lng / 1e5))
+    return puntos
 
 async def geocodificar_inverso(lat, lng):
     """Devuelve la dirección (calle) de unas coordenadas, o None si falla."""
@@ -347,7 +410,7 @@ async def geocodificar_inverso(lat, lng):
     return None
 
 async def calcular_ruta_peatonal(lat, lng, destino):
-    """Pide a Google Routes una ruta a pie. Devuelve un dict para Gemini (con '_ruta' interna)."""
+    """Pide a Google Routes una ruta a pie. Devuelve un dict para Gemini (con datos internos '_ruta' y '_polyline')."""
     if not GOOGLE_MAPS_API_KEY:
         return {"error": "El servicio de mapas no está configurado en el servidor"}
     cuerpo = {
@@ -362,6 +425,7 @@ async def calcular_ruta_peatonal(lat, lng, destino):
         "X-Goog-Api-Key": GOOGLE_MAPS_API_KEY,
         "X-Goog-FieldMask": (
             "routes.duration,routes.distanceMeters,"
+            "routes.polyline.encodedPolyline,"
             "routes.legs.steps.navigationInstruction,"
             "routes.legs.steps.distanceMeters,"
             "routes.legs.steps.endLocation"
@@ -411,7 +475,39 @@ async def calcular_ruta_peatonal(lat, lng, destino):
         "metros_de_la_primera_etapa": pasos[0]["metros"],
         "resumen_de_indicaciones": [p["texto"] for p in pasos[:12]],
         "_ruta": {"destino": destino, "pasos": pasos, "indice": 0},
+        "_polyline": (ruta.get("polyline") or {}).get("encodedPolyline"),
     }
+
+async def generar_mapa_ruta(solicitud_id, polyline):
+    """Pide a Google Maps Static API la imagen de la ruta y la guarda en la base de datos."""
+    if not GOOGLE_MAPS_API_KEY or not polyline or not solicitud_id:
+        return
+    try:
+        puntos = decodificar_polyline(polyline)
+        if len(puntos) < 2:
+            return
+        inicio, fin = puntos[0], puntos[-1]
+        parametros = [
+            ("size", "640x400"),
+            ("scale", "2"),
+            ("maptype", "roadmap"),
+            ("language", "es"),
+            ("path", f"color:0x028090ff|weight:6|enc:{polyline}"),
+            ("markers", f"color:green|label:A|{inicio[0]},{inicio[1]}"),
+            ("markers", f"color:red|label:B|{fin[0]},{fin[1]}"),
+            ("key", GOOGLE_MAPS_API_KEY),
+        ]
+        async with httpx.AsyncClient(timeout=15) as cliente:
+            r = await cliente.get("https://maps.googleapis.com/maps/api/staticmap", params=parametros)
+        if r.status_code == 200 and r.headers.get("content-type", "").startswith("image"):
+            await asyncio.to_thread(
+                guardar_mapa_ruta, solicitud_id, base64.b64encode(r.content).decode("utf-8")
+            )
+            print(f"Mapa de la ruta {solicitud_id} guardado")
+        else:
+            print(f"Static Maps no devolvió imagen (HTTP {r.status_code}): {r.text[:200]}")
+    except Exception as e:
+        print(f"Error generando el mapa de la ruta: {type(e).__name__}")
 
 def indicacion_actual():
     """Dice dónde va el usuario en la ruta activa según su última ubicación."""
@@ -495,6 +591,56 @@ def listar_usuarios(usuario: Usuario = Depends(usuario_actual), db: Session = De
     usuarios = db.query(Usuario).all()
     return [{"id": u.id, "nombre": u.nombre, "email": u.email, "rol": u.rol.nombre} for u in usuarios]
 
+@app.patch("/usuarios/{usuario_id}")
+def editar_usuario(
+    usuario_id: int, datos: UsuarioEditar,
+    actual: Usuario = Depends(usuario_actual), db: Session = Depends(get_db),
+):
+    if actual.rol.nombre != "administrador":
+        raise HTTPException(status_code=403, detail="No autorizado")
+    objetivo = db.query(Usuario).filter(Usuario.id == usuario_id).first()
+    if not objetivo:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+
+    if datos.nombre is not None:
+        nombre = datos.nombre.strip()
+        if not nombre:
+            raise HTTPException(status_code=400, detail="El nombre no puede estar vacío")
+        objetivo.nombre = nombre
+
+    if datos.email is not None:
+        email = datos.email.strip()
+        if not email or "@" not in email:
+            raise HTTPException(status_code=400, detail="Escribe un correo válido")
+        otro = db.query(Usuario).filter(Usuario.email == email, Usuario.id != objetivo.id).first()
+        if otro:
+            raise HTTPException(status_code=400, detail="Ese correo ya está en uso")
+        objetivo.email = email
+
+    if datos.rol_nombre is not None:
+        if datos.rol_nombre not in ROLES_VALIDOS:
+            raise HTTPException(status_code=400, detail="Rol no válido")
+        if objetivo.id == actual.id and datos.rol_nombre != "administrador":
+            raise HTTPException(status_code=400, detail="No puedes quitarte tu propio rol de administrador")
+        rol = db.query(Rol).filter(Rol.nombre == datos.rol_nombre).first()
+        if not rol:
+            rol = Rol(nombre=datos.rol_nombre)
+            db.add(rol)
+            db.commit()
+            db.refresh(rol)
+        objetivo.rol_id = rol.id
+
+    if datos.password:
+        if len(datos.password) < 8:
+            raise HTTPException(status_code=400, detail="La contraseña debe tener al menos 8 caracteres")
+        if len(datos.password.encode("utf-8")) > 72:
+            raise HTTPException(status_code=400, detail="La contraseña no puede superar 72 caracteres")
+        objetivo.password_hash = pwd_context.hash(datos.password)
+
+    db.commit()
+    db.refresh(objetivo)
+    return {"id": objetivo.id, "nombre": objetivo.nombre, "email": objetivo.email, "rol": objetivo.rol.nombre}
+
 @app.get("/alertas")
 def listar_alertas(usuario: Usuario = Depends(usuario_actual), db: Session = Depends(get_db)):
     alertas = db.query(Alerta).order_by(Alerta.timestamp.desc()).limit(50).all()
@@ -525,6 +671,10 @@ def cambiar_estado_dispositivo(dispositivo_id: int, usuario: Usuario = Depends(u
     db.commit()
     return {"id": dispositivo.id, "activo": dispositivo.activo}
 
+@app.get("/estado/conexion")
+def estado_conexion(usuario: Usuario = Depends(usuario_actual)):
+    return {"sesion_activa": sesiones_activas["n"] > 0}
+
 @app.get("/video/ultimo-frame")
 def obtener_ultimo_frame(usuario: Usuario = Depends(usuario_actual)):
     return {"frame": ultimo_frame_b64, "hora": ultimo_frame_hora}
@@ -534,7 +684,7 @@ def listar_interacciones(
     solo_imagenes: bool = False, limite: int = 30,
     usuario: Usuario = Depends(usuario_actual), db: Session = Depends(get_db),
 ):
-    consulta = db.query(Interaccion)
+    consulta = db.query(Interaccion).options(defer(Interaccion.imagen_b64))
     if solo_imagenes:
         consulta = consulta.filter(Interaccion.tiene_imagen == True)
     filas = consulta.order_by(Interaccion.timestamp.desc()).limit(min(limite, 100)).all()
@@ -565,7 +715,13 @@ def historial_rutas(
     limite: int = 50,
     usuario: Usuario = Depends(usuario_actual), db: Session = Depends(get_db),
 ):
-    filas = db.query(SolicitudRuta).order_by(SolicitudRuta.timestamp.desc()).limit(min(limite, 200)).all()
+    filas = (
+        db.query(SolicitudRuta)
+        .options(defer(SolicitudRuta.mapa_b64))
+        .order_by(SolicitudRuta.timestamp.desc())
+        .limit(min(limite, 200))
+        .all()
+    )
     return [
         {
             "id": f.id,
@@ -576,9 +732,20 @@ def historial_rutas(
             "duracion_min": f.duracion_min,
             "exito": bool(f.exito),
             "resumen": f.resumen,
+            "tiene_mapa": bool(f.tiene_mapa),
         }
         for f in filas
     ]
+
+@app.get("/rutas/{solicitud_id}/mapa")
+def mapa_de_ruta(
+    solicitud_id: int,
+    usuario: Usuario = Depends(usuario_actual), db: Session = Depends(get_db),
+):
+    fila = db.query(SolicitudRuta).filter(SolicitudRuta.id == solicitud_id).first()
+    if not fila or not fila.mapa_b64:
+        raise HTTPException(status_code=404, detail="Mapa no disponible")
+    return Response(content=base64.b64decode(fila.mapa_b64), media_type="image/png")
 
 @app.get("/estadisticas")
 def obtener_estadisticas(usuario: Usuario = Depends(usuario_actual), db: Session = Depends(get_db)):
@@ -608,12 +775,13 @@ def turno_vacio():
 @app.websocket("/ws/asistente")
 async def websocket_asistente(websocket: WebSocket):
     await websocket.accept()
+    sesiones_activas["n"] += 1
     db = SessionLocal()
     estado = {
         "cliente_activo": True,
         "foto_pendiente": None,
         "direccion_enviada": None,
-        "handle": None,                 # para reanudar la conversación con Gemini
+        "handle": None,
         "herramienta_en_curso": False,
         "turno": turno_vacio(),
     }
@@ -627,7 +795,6 @@ async def websocket_asistente(websocket: WebSocket):
         async with gemini_client.aio.live.connect(model=GEMINI_MODEL, config=config) as session:
             print(f"Sesión con Gemini abierta (reanudando conversación: {reanudando})")
 
-            # En una sesión nueva (no reanudada) damos la ubicación conocida
             if ultima_ubicacion and not reanudando:
                 await session.send_realtime_input(text=texto_contexto_ubicacion(ultima_ubicacion))
 
@@ -677,7 +844,6 @@ async def websocket_asistente(websocket: WebSocket):
                                 audio=types.Blob(data=base64.b64decode(dato), mime_type="audio/pcm;rate=16000")
                             )
                         elif tipo == "video":
-                            # Imagen automática (modo caminata)
                             ultimo_frame_b64 = dato
                             ultimo_frame_hora = datetime.utcnow().isoformat()
                             await session.send_realtime_input(
@@ -741,6 +907,8 @@ async def websocket_asistente(websocket: WebSocket):
             async def atender_obtener_ruta(llamada):
                 destino = str((llamada.args or {}).get("destino", "")).strip()
                 print(f"AVIVA pidió obtener_ruta hacia: '{destino}'")
+                solicitud_id = None
+                polyline = None
                 if not destino:
                     resultado = {"error": "Falta el destino"}
                 elif ultima_lat is None or ultima_lng is None:
@@ -748,6 +916,7 @@ async def websocket_asistente(websocket: WebSocket):
                 else:
                     resultado = await calcular_ruta_peatonal(ultima_lat, ultima_lng, destino)
                     ruta_interna = resultado.pop("_ruta", None)
+                    polyline = resultado.pop("_polyline", None)
                     if ruta_interna:
                         ruta_activa["ruta"] = ruta_interna
                     resumen = None
@@ -755,7 +924,7 @@ async def websocket_asistente(websocket: WebSocket):
                         resumen = "\n".join(
                             f"{n + 1}. {p['texto']}" for n, p in enumerate(ruta_interna["pasos"])
                         )
-                    await asyncio.to_thread(
+                    solicitud_id = await asyncio.to_thread(
                         guardar_solicitud_ruta,
                         estado["direccion_enviada"] or ultima_ubicacion,
                         destino,
@@ -766,8 +935,13 @@ async def websocket_asistente(websocket: WebSocket):
                     )
                 await responder_herramienta(llamada, resultado)
 
+                # El mapa se genera DESPUÉS de responder, para no demorar a AVIVA
+                if solicitud_id and polyline:
+                    tarea = asyncio.create_task(generar_mapa_ruta(solicitud_id, polyline))
+                    tareas_fondo.add(tarea)
+                    tarea.add_done_callback(tareas_fondo.discard)
+
             async def cerrar_turno():
-                # Si AVIVA está usando una herramienta, el turno todavía no terminó
                 if estado["herramienta_en_curso"]:
                     return
                 turno = estado["turno"]
@@ -782,7 +956,6 @@ async def websocket_asistente(websocket: WebSocket):
             async def enviar_al_cliente():
                 while True:
                     async for respuesta in session.receive():
-                        # Datos para reanudar la conversación si se corta la conexión
                         if respuesta.session_resumption_update:
                             actualizacion = respuesta.session_resumption_update
                             if actualizacion.resumable and actualizacion.new_handle:
@@ -844,7 +1017,6 @@ async def websocket_asistente(websocket: WebSocket):
                 duracion = time.time() - inicio_sesion
                 print(f"Sesión con Gemini interrumpida tras {duracion:.0f} s, reconectando... ({e})")
                 if usar_avanzada and duracion < 5:
-                    # Falló al conectar: probamos sin el handle y, si se repite, con la configuración básica
                     fallos_rapidos += 1
                     estado["handle"] = None
                     if fallos_rapidos >= 2:
@@ -854,6 +1026,7 @@ async def websocket_asistente(websocket: WebSocket):
                     fallos_rapidos = 0
                 await asyncio.sleep(1)
     finally:
+        sesiones_activas["n"] = max(0, sesiones_activas["n"] - 1)
         db.close()
         print("Cliente desconectado del asistente")
 

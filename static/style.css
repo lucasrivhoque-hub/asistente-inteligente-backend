@@ -232,3 +232,134 @@ details summary { cursor: pointer; color: var(--teal); font-size: 13px; font-wei
   .live-card, .consulta { grid-template-columns: 1fr; }
   .main { padding: 20px 16px 40px; }
 }
+/* ===== Pantalla de acceso: solo la tarjeta ===== */
+.auth {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  position: relative;
+  overflow: hidden;
+  background: linear-gradient(160deg, #013e45 0%, #02525c 55%, #028090 100%);
+}
+.auth-bg-shape {
+  position: absolute;
+  border-radius: 50%;
+  pointer-events: none;
+}
+.auth-bg-shape.s1 { width: 520px; height: 520px; background: #00a896; top: -170px; right: -130px; opacity: .2; }
+.auth-bg-shape.s2 { width: 440px; height: 440px; background: #e1b12c; bottom: -190px; left: -150px; opacity: .13; }
+
+.auth-card {
+  position: relative;
+  z-index: 1;
+  width: 100%;
+  max-width: 400px;
+  background: #ffffff;
+  border-radius: 20px;
+  padding: 36px 32px 28px;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, .3);
+}
+.auth-logo {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  margin-bottom: 22px;
+}
+.auth-logo .brand-name { color: var(--teal-d); font-size: 22px; }
+.auth-logo .logo-dot { box-shadow: 0 0 0 4px rgba(2, 128, 144, .14); }
+.auth-card h2 { text-align: center; font-size: 22px; margin-bottom: 4px; }
+.auth-card .error,
+.auth-card .ok { text-align: center; }
+
+.field { position: relative; }
+.field svg {
+  position: absolute;
+  left: 13px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 18px;
+  height: 18px;
+  color: var(--mute);
+  pointer-events: none;
+}
+.field input { padding-left: 42px; }
+/* ===== Dispositivos con imagen ===== */
+.dispositivo {
+  display: grid;
+  grid-template-columns: 200px 1fr auto;
+  gap: 20px;
+  align-items: center;
+  padding: 16px 4px;
+  border-bottom: 1px solid var(--line);
+}
+.dispositivo:last-child { border-bottom: 0; }
+.disp-img {
+  background: linear-gradient(160deg, #eef5f5, #dcebec);
+  border-radius: 14px;
+  min-height: 110px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 10px;
+  overflow: hidden;
+}
+.disp-img img, .disp-img svg { width: 100%; max-height: 120px; object-fit: contain; display: block; }
+.disp-info b { font-size: 16px; display: block; margin-bottom: 8px; }
+.disp-info small { display: block; color: var(--mute); margin-top: 8px; }
+.disp-tags { display: flex; gap: 8px; flex-wrap: wrap; }
+.estado.live { background: #e6f4f4; color: var(--teal); }
+.estado.live::before {
+  content: "";
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--sea);
+  margin-right: 6px;
+  animation: pulso 1.4s infinite;
+}
+@keyframes pulso { 0% { opacity: 1; } 50% { opacity: .3; } 100% { opacity: 1; } }
+
+/* ===== Mapa de la ruta ===== */
+.mapa-ruta {
+  display: block;
+  width: 100%;
+  max-width: 400px;
+  margin-top: 10px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  cursor: zoom-in;
+}
+
+/* ===== Editor de usuario ===== */
+.modal {
+  position: fixed;
+  inset: 0;
+  background: rgba(16, 38, 42, .55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  z-index: 40;
+}
+.modal-box {
+  background: #fff;
+  border-radius: 16px;
+  padding: 26px;
+  width: 100%;
+  max-width: 440px;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, .3);
+  max-height: 92vh;
+  overflow: auto;
+}
+.modal-box h3 { margin-bottom: 4px; font-size: 18px; }
+.clave-row { display: flex; gap: 8px; align-items: center; }
+.clave-row input { flex: 1; }
+.modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 18px; align-items: center; }
+
+@media (max-width: 900px) {
+  .dispositivo { grid-template-columns: 1fr; }
+}

@@ -11,50 +11,65 @@
 
 <!-- ============ ACCESO ============ -->
 <div id="auth-view" class="auth">
-  <div class="auth-brand">
-    <div class="brand-row"><span class="logo-dot"></span><span class="brand-name">AVIVA</span></div>
-    <h1>Asistente inteligente de movilidad</h1>
-    <p>Descripción del entorno, lectura de texto y guía de rutas por voz para personas con discapacidad visual.</p>
-    <div class="brand-points">
-      <div>Visión por inteligencia artificial en tiempo real</div>
-      <div>Rutas a pie con indicaciones en español</div>
-      <div>Monitoreo remoto con acceso por roles</div>
+  <div class="auth-bg-shape s1"></div>
+  <div class="auth-bg-shape s2"></div>
+
+  <div id="login-view" class="auth-card">
+    <div class="auth-logo"><span class="logo-dot"></span><span class="brand-name">AVIVA</span></div>
+    <h2>Iniciar sesión</h2>
+
+    <label>Correo electrónico</label>
+    <div class="field">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><polyline points="3 7 12 13 21 7"/></svg>
+      <input type="email" id="email" placeholder="correo@ejemplo.com" autocomplete="username">
     </div>
+
+    <label>Contraseña</label>
+    <div class="field">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>
+      <input type="password" id="password" placeholder="••••••••" autocomplete="current-password"
+             onkeydown="if(event.key==='Enter')iniciarSesion()">
+    </div>
+
+    <button class="btn" onclick="iniciarSesion()">Ingresar</button>
+    <p id="error-msg" class="error"></p>
+    <p class="switch-link">¿No tienes cuenta? <a onclick="mostrarRegistro()">Regístrate</a></p>
   </div>
 
-  <div class="auth-forms">
-    <div id="login-view" class="auth-card">
-      <h2>Iniciar sesión</h2>
-      <p class="sub">Accede al panel de control de AVIVA.</p>
-      <label>Correo electrónico</label>
-      <input type="email" id="email" placeholder="correo@ejemplo.com">
-      <label>Contraseña</label>
-      <input type="password" id="password" placeholder="••••••••">
-      <button class="btn" onclick="iniciarSesion()">Ingresar</button>
-      <p id="error-msg" class="error"></p>
-      <p class="switch-link">¿No tienes cuenta? <a onclick="mostrarRegistro()">Regístrate</a></p>
+  <div id="registro-view" class="auth-card hidden">
+    <div class="auth-logo"><span class="logo-dot"></span><span class="brand-name">AVIVA</span></div>
+    <h2>Crear cuenta</h2>
+
+    <label>Nombre completo</label>
+    <div class="field">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 4-6 8-6s8 2 8 6"/></svg>
+      <input type="text" id="reg-nombre" placeholder="Nombre y apellido">
     </div>
 
-    <div id="registro-view" class="auth-card hidden">
-      <h2>Crear cuenta</h2>
-      <p class="sub">Registro de un nuevo usuario del sistema.</p>
-      <label>Nombre completo</label>
-      <input type="text" id="reg-nombre" placeholder="Nombre y apellido">
-      <label>Correo electrónico</label>
+    <label>Correo electrónico</label>
+    <div class="field">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><polyline points="3 7 12 13 21 7"/></svg>
       <input type="email" id="reg-email" placeholder="correo@ejemplo.com">
-      <label>Contraseña</label>
-      <input type="password" id="reg-password" placeholder="Mínimo 8 caracteres">
-      <label>Rol</label>
-      <select id="reg-rol">
-        <option value="administrador">Administrador</option>
-        <option value="operador">Operador</option>
-        <option value="tecnico">Servicio técnico</option>
-      </select>
-      <button class="btn" onclick="registrarUsuario()">Crear cuenta</button>
-      <p id="registro-error-msg" class="error"></p>
-      <p id="registro-ok-msg" class="ok"></p>
-      <p class="switch-link">¿Ya tienes cuenta? <a onclick="mostrarLogin()">Inicia sesión</a></p>
     </div>
+
+    <label>Contraseña</label>
+    <div class="field">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>
+      <input type="password" id="reg-password" placeholder="Mínimo 8 caracteres"
+             onkeydown="if(event.key==='Enter')registrarUsuario()">
+    </div>
+
+    <label>Rol</label>
+    <select id="reg-rol">
+      <option value="administrador">Administrador</option>
+      <option value="operador">Operador</option>
+      <option value="tecnico">Servicio técnico</option>
+    </select>
+
+    <button class="btn" onclick="registrarUsuario()">Crear cuenta</button>
+    <p id="registro-error-msg" class="error"></p>
+    <p id="registro-ok-msg" class="ok"></p>
+    <p class="switch-link">¿Ya tienes cuenta? <a onclick="mostrarLogin()">Inicia sesión</a></p>
   </div>
 </div>
 
