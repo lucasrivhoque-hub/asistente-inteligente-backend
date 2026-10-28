@@ -122,8 +122,6 @@ INSTRUCCION_AVIVA = (
     "algo con claridad, dilo y pídele que se acerque en vez de adivinar. "
     "Nunca describas imágenes anteriores como si fueran actuales. Si la herramienta indica un "
     "error, dile al usuario con claridad que no puedes ver en este momento. "
-    "Si recibes imágenes automáticas sin haberlas pedido (modo caminata), úsalas solo como "
-    "contexto y no hables de ellas a menos que el usuario pregunte o haya un peligro inmediato. "
     "Cuando el usuario pida ir o llegar a un lugar, llama a obtener_ruta con el destino "
     "(agrega la ciudad, por ejemplo 'Cochabamba, Bolivia', si no la mencionó). Luego dile en una "
     "frase la distancia y el tiempo aproximado, y SOLO la primera indicación. Mientras camina, "
@@ -157,6 +155,164 @@ def crear_config(handle=None, avanzada=True):
         )
         opciones["session_resumption"] = types.SessionResumptionConfig(handle=handle)
     return types.LiveConnectConfig(**opciones)
+
+
+# --- Detector de obstáculos (Modo caminata) ---
+# Se prueban en orden; si uno no existe para tu clave, se pasa al siguiente.
+# Puedes forzar uno con la variable de entorno MODELO_DETECTOR.
+MODELOS_DETECTOR = [
+    m for m in [
+        os.environ.get("MODELO_DETECTOR"),
+        "gemini-3.1-flash-lite",
+        "gemini-2.5-flash-lite",
+        "gemini-2.5-flash",
+    ] if m
+]
+UMBRAL_CONFIANZA = 0.6        # confianza mínima para avisar (0 a 1)
+COOLDOWN_GENERAL_S = 3.0      # segundos mínimos entre dos avisos cualquiera
+COOLDOWN_MISMO_S = 8.0        # segundos antes de repetir el mismo aviso (mismo objeto y zona)
+TIMEOUT_DETECTOR_S = 8        # si el análisis tarda más, se descarta
+
+PROMPT_DETECTOR = (
+    "Eres el sistema de seguridad de un bastón inteligente para una persona ciega que camina. "
+    "La imagen es la vista de la cámara de sus lentes, a la altura de la cabeza, mirando hacia adelante. "
+    "Decide si hay un OBSTÁCULO O PELIGRO REAL en su camino inmediato (aproximadamente los próximos "
+    "4 metros): personas muy cerca de frente, postes, paredes o columnas, muebles, puertas o vidrios, "
+    "escalones o desniveles (de subida o de bajada), huecos, bordes de acera, vehículos, objetos bajos "
+    "o colgantes, charcos o superficies resbalosas, animales. "
+    "Reglas: "
+    "1) Si el camino está libre, o los objetos están lejos, o a los costados sin invadir el camino, "
+    "responde peligro=false. "
+    "2) Sé conservador: ante la duda, peligro=false. Los falsos avisos molestan al usuario. "
+    "3) Ignora el piso normal, la acera, las paredes lejanas y el paisaje. "
+    "4) zona: por dónde está el peligro respecto a quien camina: izquierda, centro o derecha. "
+    "5) cercania: 'inmediata' (menos de unos 1,5 metros: debe detenerse ya), 'cerca' (entre 1,5 y 4 metros) "
+    "o 'lejos' (más de 4 metros). "
+    "Responde SOLO un JSON con esta forma exacta, sin texto adicional: "
+    '{"peligro": true, "objeto": "nombre corto en español sin artículo, por ejemplo poste, '
+    'escalón hacia abajo, persona, silla", "zona": "izquierda", "cercania": "cerca", '
+    '"categoria": "objeto", "confianza": 0.8} '
+    "donde peligro es true o false; zona es izquierda, centro o derecha; cercania es inmediata, cerca o lejos; "
+    "categoria es objeto, desnivel, persona, vehiculo, aereo, superficie u otro; confianza es un número "
+    "entre 0 y 1. Si peligro es false, igual incluye todos los campos con valores neutros."
+)
+
+caminata = {
+    "ocupado": False,
+    "pausa_hasta": 0.0,
+    "analizados": 0,
+    "avisos": 0,
+    "omitidos": 0,
+    "errores": 0,
+    "latencia_total_ms": 0,
+    "modelo": None,
+    "ultimo_aviso_t": 0.0,
+    "recientes": {},
+    "indice_modelo": 0,
+}
+
+
+def interpretar_deteccion(texto):
+    """Convierte la respuesta del detector en un diccionario, tolerando formatos imperfectos."""
+    if not texto:
+        return None
+    limpio = texto.strip()
+    if limpio.startswith("```"):
+        limpio = limpio.strip("`")
+        if limpio.lower().startswith("json"):
+            limpio = limpio[4:]
+    try:
+        datos = json.loads(limpio)
+    except Exception:
+        i, j = limpio.find("{"), limpio.rfind("}")
+        if i == -1 or j == -1:
+            return None
+        try:
+            datos = json.loads(limpio[i:j + 1])
+        except Exception:
+            return None
+    if isinstance(datos, list) and datos:
+        datos = datos[0]
+    return datos if isinstance(datos, dict) else None
+
+
+def decidir_aviso(datos):
+    """Aplica las reglas para decidir si se avisa al usuario. Devuelve un dict o None."""
+    if not datos.get("peligro"):
+        return None
+    try:
+        confianza = float(datos.get("confianza", 0))
+    except Exception:
+        confianza = 0.0
+    cercania = str(datos.get("cercania", "")).lower()
+    if confianza < UMBRAL_CONFIANZA or cercania not in ("inmediata", "cerca"):
+        return None
+
+    objeto = str(datos.get("objeto", "")).strip()[:40] or "obstáculo"
+    zona = str(datos.get("zona", "centro")).lower()
+    if zona not in ("izquierda", "centro", "derecha"):
+        zona = "centro"
+    categoria = str(datos.get("categoria", "otro")).lower()[:20]
+
+    ahora = time.time()
+    if ahora - caminata["ultimo_aviso_t"] < COOLDOWN_GENERAL_S:
+        return None
+    clave = (objeto.lower(), zona)
+    previo = caminata["recientes"].get(clave)
+    if previo and ahora - previo["t"] < COOLDOWN_MISMO_S:
+        # Solo se repite si el obstáculo pasó de "cerca" a "inmediata"
+        if not (previo["cercania"] == "cerca" and cercania == "inmediata"):
+            return None
+
+    caminata["ultimo_aviso_t"] = ahora
+    caminata["recientes"][clave] = {"t": ahora, "cercania": cercania}
+    for k in [k for k, v in caminata["recientes"].items() if ahora - v["t"] > 30]:
+        caminata["recientes"].pop(k, None)
+
+    posicion = {"centro": "adelante", "izquierda": "a tu izquierda", "derecha": "a tu derecha"}[zona]
+    aviso = "Alto" if cercania == "inmediata" else "Cuidado"
+    return {
+        "frase": f"{aviso}, {objeto} {posicion}.",
+        "objeto": objeto,
+        "zona": zona,
+        "cercania": cercania,
+        "categoria": categoria,
+        "confianza": confianza,
+    }
+
+
+async def consultar_detector(imagen_bytes):
+    """Pregunta al modelo de detección. Si el modelo no existe, prueba el siguiente."""
+    ultimo_error = None
+    while caminata["indice_modelo"] < len(MODELOS_DETECTOR):
+        modelo = MODELOS_DETECTOR[caminata["indice_modelo"]]
+        try:
+            respuesta = await asyncio.wait_for(
+                gemini_client.aio.models.generate_content(
+                    model=modelo,
+                    contents=[
+                        types.Part.from_bytes(data=imagen_bytes, mime_type="image/jpeg"),
+                        PROMPT_DETECTOR,
+                    ],
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        temperature=0,
+                    ),
+                ),
+                timeout=TIMEOUT_DETECTOR_S,
+            )
+            return modelo, respuesta.text
+        except asyncio.TimeoutError:
+            raise
+        except Exception as e:
+            mensaje = str(e)
+            if "404" in mensaje or "NOT_FOUND" in mensaje.upper() or "not found" in mensaje.lower():
+                print(f"Caminata: el modelo {modelo} no está disponible; probando el siguiente")
+                caminata["indice_modelo"] += 1
+                ultimo_error = e
+                continue
+            raise
+    raise ultimo_error or RuntimeError("Ningún modelo de detección disponible")
 
 
 # --- Modelos (tablas) ---
@@ -230,6 +386,20 @@ class SolicitudRuta(Base):
     mapa_b64 = Column(Text, nullable=True)
     tiene_mapa = Column(Boolean, default=False)
 
+class AlertaObstaculo(Base):
+    """Cada aviso de obstáculo emitido por el Modo caminata."""
+    __tablename__ = "alertas_obstaculo"
+    id = Column(Integer, primary_key=True, index=True)
+    timestamp = Column(DateTime, default=datetime.utcnow)
+    objeto = Column(String, nullable=True)
+    categoria = Column(String, nullable=True)
+    zona = Column(String, nullable=True)
+    cercania = Column(String, nullable=True)
+    confianza = Column(Float, nullable=True)
+    latencia_ms = Column(Integer, nullable=True)
+    frase = Column(Text, nullable=True)
+    imagen_b64 = Column(Text, nullable=True)
+
 Base.metadata.create_all(bind=engine)
 
 # Migración ligera: agrega las columnas del mapa si la tabla ya existía
@@ -286,6 +456,20 @@ def guardar_mapa_ruta(solicitud_id, mapa_b64):
     except Exception as e:
         db.rollback()
         print(f"No se pudo guardar el mapa de la ruta: {e}")
+    finally:
+        db.close()
+
+def guardar_alerta_obstaculo(objeto, categoria, zona, cercania, confianza, latencia_ms, frase, imagen_b64):
+    db = SessionLocal()
+    try:
+        db.add(AlertaObstaculo(
+            objeto=objeto, categoria=categoria, zona=zona, cercania=cercania,
+            confianza=confianza, latencia_ms=latencia_ms, frase=frase, imagen_b64=imagen_b64,
+        ))
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        print(f"No se pudo guardar la alerta de obstáculo: {e}")
     finally:
         db.close()
 
@@ -537,6 +721,62 @@ def indicacion_actual():
         ),
     }
 
+async def analizar_frame_caminata(frame_b64, websocket):
+    """Analiza una imagen del Modo caminata y, si hay peligro, avisa a la app."""
+    inicio = time.time()
+    try:
+        imagen = base64.b64decode(frame_b64)
+        modelo, texto = await consultar_detector(imagen)
+        latencia_ms = int((time.time() - inicio) * 1000)
+        caminata["analizados"] += 1
+        caminata["latencia_total_ms"] += latencia_ms
+        caminata["modelo"] = modelo
+
+        datos = interpretar_deteccion(texto)
+        aviso = None
+        if datos is None:
+            print(f"Caminata: respuesta no interpretable ({latencia_ms} ms)")
+        else:
+            print(
+                f"Caminata: peligro={datos.get('peligro')} objeto={datos.get('objeto')} "
+                f"zona={datos.get('zona')} cercania={datos.get('cercania')} "
+                f"conf={datos.get('confianza')} ({latencia_ms} ms, {modelo})"
+            )
+            aviso = decidir_aviso(datos)
+
+        if aviso:
+            caminata["avisos"] += 1
+            print(f"Caminata: AVISO -> {aviso['frase']}")
+            await websocket.send_text(json.dumps({
+                "type": "alerta_obstaculo",
+                "texto": aviso["frase"],
+                "urgencia": aviso["cercania"],
+            }))
+            await asyncio.to_thread(
+                guardar_alerta_obstaculo, aviso["objeto"], aviso["categoria"], aviso["zona"],
+                aviso["cercania"], aviso["confianza"], latencia_ms, aviso["frase"], frame_b64,
+            )
+
+        await websocket.send_text(json.dumps({
+            "type": "caminata_estado",
+            "analizados": caminata["analizados"],
+            "avisos": caminata["avisos"],
+            "latencia_ms": latencia_ms,
+        }))
+    except asyncio.TimeoutError:
+        caminata["errores"] += 1
+        print("Caminata: el análisis tardó demasiado y se descartó")
+    except Exception as e:
+        caminata["errores"] += 1
+        mensaje = str(e)
+        if "429" in mensaje or "RESOURCE_EXHAUSTED" in mensaje.upper():
+            caminata["pausa_hasta"] = time.time() + 15
+            print("Caminata: límite de consultas de Gemini alcanzado; pausa de 15 s")
+        else:
+            print(f"Caminata: error en el análisis ({type(e).__name__}): {mensaje[:200]}")
+    finally:
+        caminata["ocupado"] = False
+
 # --- API ---
 app = FastAPI(title="Asistente Inteligente API")
 
@@ -747,6 +987,55 @@ def mapa_de_ruta(
         raise HTTPException(status_code=404, detail="Mapa no disponible")
     return Response(content=base64.b64decode(fila.mapa_b64), media_type="image/png")
 
+@app.get("/obstaculos")
+def listar_obstaculos(
+    limite: int = 30,
+    usuario: Usuario = Depends(usuario_actual), db: Session = Depends(get_db),
+):
+    filas = (
+        db.query(AlertaObstaculo)
+        .options(defer(AlertaObstaculo.imagen_b64))
+        .order_by(AlertaObstaculo.timestamp.desc())
+        .limit(min(limite, 200))
+        .all()
+    )
+    return [
+        {
+            "id": f.id,
+            "timestamp": f.timestamp.isoformat(),
+            "objeto": f.objeto,
+            "categoria": f.categoria,
+            "zona": f.zona,
+            "cercania": f.cercania,
+            "confianza": f.confianza,
+            "latencia_ms": f.latencia_ms,
+            "frase": f.frase,
+        }
+        for f in filas
+    ]
+
+@app.get("/obstaculos/{alerta_id}/imagen")
+def imagen_de_obstaculo(
+    alerta_id: int,
+    usuario: Usuario = Depends(usuario_actual), db: Session = Depends(get_db),
+):
+    fila = db.query(AlertaObstaculo).filter(AlertaObstaculo.id == alerta_id).first()
+    if not fila or not fila.imagen_b64:
+        raise HTTPException(status_code=404, detail="Imagen no encontrada")
+    return Response(content=base64.b64decode(fila.imagen_b64), media_type="image/jpeg")
+
+@app.get("/caminata/estadisticas")
+def estadisticas_caminata(usuario: Usuario = Depends(usuario_actual)):
+    analizados = caminata["analizados"]
+    return {
+        "analizados": analizados,
+        "avisos": caminata["avisos"],
+        "omitidos_por_ocupado": caminata["omitidos"],
+        "errores": caminata["errores"],
+        "latencia_media_ms": round(caminata["latencia_total_ms"] / analizados) if analizados else None,
+        "modelo": caminata["modelo"],
+    }
+
 @app.get("/estadisticas")
 def obtener_estadisticas(usuario: Usuario = Depends(usuario_actual), db: Session = Depends(get_db)):
     total_alertas = db.query(Alerta).count()
@@ -790,6 +1079,16 @@ async def websocket_asistente(websocket: WebSocket):
     db.add(Alerta(tipo="sesion", descripcion="Sesión de asistente iniciada",
                   usuario_id=None, dispositivo_id=None))
     db.commit()
+
+    def lanzar_analisis_caminata(frame_b64):
+        """Si el detector está libre, analiza la imagen en segundo plano; si no, la salta."""
+        if caminata["ocupado"] or time.time() < caminata["pausa_hasta"]:
+            caminata["omitidos"] += 1
+            return
+        caminata["ocupado"] = True
+        tarea = asyncio.create_task(analizar_frame_caminata(frame_b64, websocket))
+        tareas_fondo.add(tarea)
+        tarea.add_done_callback(tareas_fondo.discard)
 
     async def manejar_sesion(config, reanudando):
         async with gemini_client.aio.live.connect(model=GEMINI_MODEL, config=config) as session:
@@ -843,6 +1142,11 @@ async def websocket_asistente(websocket: WebSocket):
                             await session.send_realtime_input(
                                 audio=types.Blob(data=base64.b64decode(dato), mime_type="audio/pcm;rate=16000")
                             )
+                        elif tipo == "frame_caminata":
+                            # Imagen del Modo caminata: va solo al detector, no a la conversación
+                            ultimo_frame_b64 = dato
+                            ultimo_frame_hora = datetime.utcnow().isoformat()
+                            lanzar_analisis_caminata(dato)
                         elif tipo == "video":
                             ultimo_frame_b64 = dato
                             ultimo_frame_hora = datetime.utcnow().isoformat()
