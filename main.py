@@ -111,15 +111,15 @@ INSTRUCCION_AVIVA = (
     "Eres AVIVA, un asistente de voz para una persona con discapacidad visual. "
     "Preséntate SOLO al inicio de la conversación. Si ya estás conversando con el usuario, "
     "no vuelvas a saludar ni a presentarte, y continúa siempre desde lo que ya hablaron. "
-    "Tus ojos son la cámara de sus lentes, pero solo ves cuando llamas a la herramienta "
-    "ver_entorno. Antes de responder CUALQUIER pregunta sobre lo que hay enfrente, alrededor, "
-    "obstáculos o textos, llama SIEMPRE a ver_entorno, aunque creas que ya lo sabes por una imagen "
-    "anterior. Mientras esperas el resultado di ÚNICAMENTE 'Un momento, miro' y no describas ni "
-    "supongas nada. Solo describe lo que veas en la foto que recibas como resultado. "
-    "Si te piden leer texto, carteles, etiquetas, precios o pantallas, o ver detalles pequeños, "
-    "llama a ver_entorno con detalle=true y pídele que acerque el texto y se quede quieto unos "
-    "segundos; para descripciones generales u obstáculos usa detalle=false. Si no logras leer "
-    "algo con claridad, dilo y pídele que se acerque en vez de adivinar. "
+    "Tus ojos son la cámara de sus lentes, pero solo ves cuando llamas a la herramienta ver_entorno. "
+    "Cuando el usuario te pida ver, describir lo que tiene enfrente o alrededor, detectar obstáculos "
+    "o leer algo, tu PRIMERA acción debe ser llamar a ver_entorno. NO hables antes de llamarla y NO "
+    "digas frases como 'un momento', 'voy a mirar' o 'quédate quieto': primero llama a la herramienta, "
+    "espera su resultado y solo entonces responde, describiendo únicamente lo que se ve en la foto recibida. "
+    "Para leer texto, carteles, etiquetas, precios o pantallas, o ver detalles pequeños, llama a "
+    "ver_entorno con detalle=true; cuando recibas la foto, lee lo que se distinga. Si algo no se lee "
+    "bien, dilo y sugiere acercar el texto, pero no le pidas que espere: la foto ya fue tomada. "
+    "Para descripciones generales u obstáculos usa detalle=false. "
     "Nunca describas imágenes anteriores como si fueran actuales. Si la herramienta indica un "
     "error, dile al usuario con claridad que no puedes ver en este momento. "
     "Cuando el usuario pida ir o llegar a un lugar, llama a obtener_ruta con el destino "
@@ -137,7 +137,6 @@ INSTRUCCION_AVIVA = (
     "recibido ninguna ubicación, di que aún no tienes la ubicación y NUNCA inventes ni adivines una. "
     "Responde de forma breve, clara y natural en español."
 )
-
 
 def crear_config(handle=None, avanzada=True):
     """Configuración de la sesión con Gemini. 'avanzada' agrega transcripción,
@@ -815,6 +814,48 @@ async def analizar_frame_caminata(frame_b64, websocket):
     finally:
                 liberar_analisis()
 
+
+PROMPT_DESCRIBIR = (
+    "Eres AVIVA, asistente de una persona ciega. La imagen es la vista actual de la cámara de sus lentes. "
+    "Describe en español, en 2 a 4 frases cortas y claras, lo que hay enfrente: objetos principales, "
+    "personas, obstáculos o peligros cercanos y su posición (izquierda, centro o derecha). "
+    "No inventes: si algo no se distingue, dilo. No menciones que es una imagen ni una foto."
+)
+PROMPT_LEER = (
+    "Eres AVIVA, asistente de una persona ciega. La imagen es la vista actual de la cámara de sus lentes. "
+    "Lee TODO el texto legible que aparezca (carteles, etiquetas, pantallas, papeles), en el orden natural "
+    "de lectura. Si hay texto pero es ilegible o está cortado, di qué parte no se puede leer y sugiere "
+    "acercar el objeto. Si no hay texto, dilo. No inventes palabras. No menciones que es una imagen."
+)
+
+
+async def describir_imagen(imagen_bytes, modo):
+    """Describe o lee el texto de una imagen. Prueba varios modelos si alguno falla."""
+    prompt = PROMPT_LEER if modo == "leer" else PROMPT_DESCRIBIR
+    modelos = (["gemini-2.5-flash"] + MODELOS_DETECTOR) if modo == "leer" else list(MODELOS_DETECTOR)
+    ultimo_error = None
+    for modelo in modelos:
+        try:
+            respuesta = await asyncio.wait_for(
+                gemini_client.aio.models.generate_content(
+                    model=modelo,
+                    contents=[
+                        types.Part.from_bytes(data=imagen_bytes, mime_type="image/jpeg"),
+                        prompt,
+                    ],
+                    config=types.GenerateContentConfig(temperature=0.2),
+                ),
+                timeout=14,
+            )
+            texto = (respuesta.text or "").strip()
+            if texto:
+                return texto
+        except Exception as e:
+            ultimo_error = e
+            print(f"Visión: falló el modelo {modelo} ({type(e).__name__}): {str(e)[:150]}")
+            continue
+    raise ultimo_error or RuntimeError("No se obtuvo ninguna respuesta del modelo")
+
 # --- API ---
 app = FastAPI(title="Asistente Inteligente API")
 
@@ -1127,6 +1168,23 @@ async def websocket_asistente(websocket: WebSocket):
         tareas_fondo.add(tarea)
         tarea.add_done_callback(tareas_fondo.discard)
 
+    async def atender_consulta_vision(frame_b64, modo):
+        """Botones Describir / Leer texto de la app: el servidor analiza la imagen y la app dice el resultado."""
+        inicio = time.time()
+        pregunta = "Leer texto (botón)" if modo == "leer" else "Describir lo que veo (botón)"
+        try:
+            texto = await describir_imagen(base64.b64decode(frame_b64), modo)
+        except Exception as e:
+            print(f"Consulta de visión ({modo}) falló: {type(e).__name__}: {str(e)[:150]}")
+            texto = "No pude analizar la imagen en este momento. Intenta de nuevo."
+        texto = texto[:1500]
+        print(f"Consulta de visión ({modo}) resuelta en {time.time() - inicio:.1f} s")
+        try:
+            await websocket.send_text(json.dumps({"type": "respuesta_vision", "texto": texto, "modo": modo}))
+        except Exception:
+            pass
+        await asyncio.to_thread(guardar_interaccion, pregunta, texto, frame_b64, modo == "leer")
+
     async def manejar_sesion(config, reanudando):
         async with gemini_client.aio.live.connect(model=GEMINI_MODEL, config=config) as session:
             print(f"Sesión con Gemini abierta (reanudando conversación: {reanudando})")
@@ -1184,6 +1242,15 @@ async def websocket_asistente(websocket: WebSocket):
                             ultimo_frame_b64 = dato
                             ultimo_frame_hora = datetime.utcnow().isoformat()
                             lanzar_analisis_caminata(dato)
+                        elif tipo == "consulta_vision":
+                            # Botones Describir / Leer texto: análisis directo, sin depender de la herramienta de voz
+                            ultimo_frame_b64 = dato
+                            ultimo_frame_hora = datetime.utcnow().isoformat()
+                            tarea = asyncio.create_task(
+                                atender_consulta_vision(dato, datos.get("modo", "describir"))
+                            )
+                            tareas_fondo.add(tarea)
+                            tarea.add_done_callback(tareas_fondo.discard)
                         elif tipo == "video":
                             ultimo_frame_b64 = dato
                             ultimo_frame_hora = datetime.utcnow().isoformat()
@@ -1233,6 +1300,9 @@ async def websocket_asistente(websocket: WebSocket):
                     await session.send_realtime_input(
                         video=types.Blob(data=base64.b64decode(dato), mime_type="image/jpeg")
                     )
+                    # El video en vivo se procesa a ~1 cuadro por segundo: se espera para que
+                    # AVIVA vea la imagen NUEVA antes de responder (y no la anterior)
+                    await asyncio.sleep(1.2)
                     resultado = {
                         "resultado": (
                             "Esta es la foto ACTUAL que tomaron los lentes para la pregunta del usuario. "
@@ -1388,5 +1458,6 @@ async def websocket_asistente(websocket: WebSocket):
         sesiones_activas["n"] = max(0, sesiones_activas["n"] - 1)
         db.close()
         print("Cliente desconectado del asistente")
+        
 # --- Archivos estáticos: interfaz web ---
 app.mount("/app", StaticFiles(directory="static", html=True), name="static")
