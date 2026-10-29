@@ -1110,6 +1110,7 @@ async def websocket_asistente(websocket: WebSocket):
         "direccion_enviada": None,
         "handle": None,
         "herramienta_en_curso": False,
+        "esperando_respuesta": False,
         "turno": turno_vacio(),
     }
 
@@ -1218,7 +1219,7 @@ async def websocket_asistente(websocket: WebSocket):
                 estado["foto_pendiente"] = futuro
                 await websocket.send_text(json.dumps({"type": "capture_request", "detalle": detalle}))
                 try:
-                    tipo, dato = await asyncio.wait_for(futuro, timeout=25)
+                    tipo, dato = await asyncio.wait_for(futuro, timeout=15)
                 except asyncio.TimeoutError:
                     tipo, dato = "foto_error", "La cámara tardó demasiado en responder"
                 finally:
@@ -1305,6 +1306,7 @@ async def websocket_asistente(websocket: WebSocket):
 
                         if respuesta.tool_call:
                             estado["herramienta_en_curso"] = True
+                            estado["esperando_respuesta"] = True
                             try:
                                 for llamada in respuesta.tool_call.function_calls:
                                     if llamada.name == "ver_entorno":
@@ -1323,9 +1325,11 @@ async def websocket_asistente(websocket: WebSocket):
                         if contenido:
                             if contenido.input_transcription and contenido.input_transcription.text:
                                 estado["turno"]["pregunta"] += contenido.input_transcription.text
+                                estado["esperando_respuesta"] = True
                             if contenido.output_transcription and contenido.output_transcription.text:
                                 estado["turno"]["respuesta"] += contenido.output_transcription.text
                             if contenido.turn_complete:
+                                estado["esperando_respuesta"] = False
                                 await cerrar_turno()
 
                         if respuesta.data:
@@ -1356,6 +1360,21 @@ async def websocket_asistente(websocket: WebSocket):
                     break
                 duracion = time.time() - inicio_sesion
                 print(f"Sesión con Gemini interrumpida tras {duracion:.0f} s, reconectando... ({e})")
+
+                # Si se cortó con una consulta en curso, se le pide al usuario que la repita
+                if estado["esperando_respuesta"]:
+                    print("La interrupción ocurrió con una consulta en curso: se avisa al usuario que repita")
+                    estado["esperando_respuesta"] = False
+                    estado["herramienta_en_curso"] = False
+                    estado["turno"] = turno_vacio()
+                    try:
+                        await websocket.send_text(json.dumps({
+                            "type": "aviso_voz",
+                            "texto": "Se cortó la conexión. Repite tu pregunta, por favor.",
+                        }))
+                    except Exception:
+                        pass
+
                 if usar_avanzada and duracion < 5:
                     fallos_rapidos += 1
                     estado["handle"] = None
@@ -1364,11 +1383,10 @@ async def websocket_asistente(websocket: WebSocket):
                         usar_avanzada = False
                 else:
                     fallos_rapidos = 0
-                await asyncio.sleep(1)
+                await asyncio.sleep(0.3)
     finally:
         sesiones_activas["n"] = max(0, sesiones_activas["n"] - 1)
         db.close()
         print("Cliente desconectado del asistente")
-
 # --- Archivos estáticos: interfaz web ---
 app.mount("/app", StaticFiles(directory="static", html=True), name="static")
