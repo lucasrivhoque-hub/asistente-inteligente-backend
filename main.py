@@ -43,7 +43,7 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
 ROLES_VALIDOS = {"administrador", "operador", "tecnico"}
 
 # --- Google Maps ---
-GOOGLE_MAPS_API_KEY = os.environ.get("GOOGLE_MAPS_API_KEY")
+GOOGLE_MAPS_API_KEY = os.environ.get("GOOGLE_MAPS_API_KEY") or os.environ.get("CLAVE_API_DE_GOOGLE_MAPS")
 
 # --- Gemini Live ---
 os.environ["GOOGLE_API_KEY"] = os.environ.get("GEMINI_API_KEY")
@@ -169,9 +169,11 @@ MODELOS_DETECTOR = [
     ] if m
 ]
 UMBRAL_CONFIANZA = 0.6        # confianza mínima para avisar (0 a 1)
-COOLDOWN_GENERAL_S = 3.0      # segundos mínimos entre dos avisos cualquiera
-COOLDOWN_MISMO_S = 8.0        # segundos antes de repetir el mismo aviso (mismo objeto y zona)
+COOLDOWN_GENERAL_S = 1.5      # segundos mínimos entre dos avisos cualquiera
+COOLDOWN_MISMO_S = 5.0        # segundos antes de repetir el mismo aviso (mismo objeto y zona)
 TIMEOUT_DETECTOR_S = 8        # si el análisis tarda más, se descarta
+MAX_EN_VUELO = 2              # análisis simultáneos permitidos
+MAX_CONSULTAS_POR_MINUTO = 28 # protege el límite gratuito de Gemini (si tu plan es de pago, súbelo a 60 o más)
 
 PROMPT_DETECTOR = (
     "Eres el sistema de seguridad de un bastón inteligente para una persona ciega que camina. "
@@ -199,6 +201,8 @@ PROMPT_DETECTOR = (
 
 caminata = {
     "ocupado": False,
+    "en_vuelo": 0,
+    "ventana": [],
     "pausa_hasta": 0.0,
     "analizados": 0,
     "avisos": 0,
@@ -209,7 +213,27 @@ caminata = {
     "ultimo_aviso_t": 0.0,
     "recientes": {},
     "indice_modelo": 0,
+    "sin_thinking": set(),
 }
+
+
+def reservar_analisis():
+    """Decide si se puede analizar una imagen ahora (límite de simultáneos y de consultas por minuto)."""
+    ahora = time.time()
+    if ahora < caminata["pausa_hasta"] or caminata["en_vuelo"] >= MAX_EN_VUELO:
+        caminata["omitidos"] += 1
+        return False
+    caminata["ventana"] = [t for t in caminata["ventana"] if ahora - t < 60]
+    if len(caminata["ventana"]) >= MAX_CONSULTAS_POR_MINUTO:
+        caminata["omitidos"] += 1
+        return False
+    caminata["ventana"].append(ahora)
+    caminata["en_vuelo"] += 1
+    return True
+
+
+def liberar_analisis():
+    caminata["en_vuelo"] = max(0, caminata["en_vuelo"] - 1)
 
 
 def interpretar_deteccion(texto):
@@ -269,16 +293,28 @@ def decidir_aviso(datos):
     for k in [k for k, v in caminata["recientes"].items() if ahora - v["t"] > 30]:
         caminata["recientes"].pop(k, None)
 
-    posicion = {"centro": "adelante", "izquierda": "a tu izquierda", "derecha": "a tu derecha"}[zona]
+    # Frases cortas: al centro no se dice "adelante"
+    posicion = {"centro": "", "izquierda": " a la izquierda", "derecha": " a la derecha"}[zona]
     aviso = "Alto" if cercania == "inmediata" else "Cuidado"
     return {
-        "frase": f"{aviso}, {objeto} {posicion}.",
+        "frase": f"{aviso}, {objeto}{posicion}.",
         "objeto": objeto,
         "zona": zona,
         "cercania": cercania,
         "categoria": categoria,
         "confianza": confianza,
     }
+
+
+def config_detector(modelo):
+    """Configuración de la consulta. Intenta desactivar el 'razonamiento' del modelo para ir más rápido."""
+    opciones = dict(response_mime_type="application/json", temperature=0)
+    if modelo not in caminata["sin_thinking"]:
+        if "2.5" in modelo:
+            opciones["thinking_config"] = types.ThinkingConfig(thinking_budget=0)
+        elif modelo.startswith("gemini-3"):
+            opciones["thinking_config"] = types.ThinkingConfig(thinking_level="minimal")
+    return types.GenerateContentConfig(**opciones)
 
 
 async def consultar_detector(imagen_bytes):
@@ -294,10 +330,7 @@ async def consultar_detector(imagen_bytes):
                         types.Part.from_bytes(data=imagen_bytes, mime_type="image/jpeg"),
                         PROMPT_DETECTOR,
                     ],
-                    config=types.GenerateContentConfig(
-                        response_mime_type="application/json",
-                        temperature=0,
-                    ),
+                    config=config_detector(modelo),
                 ),
                 timeout=TIMEOUT_DETECTOR_S,
             )
@@ -306,7 +339,12 @@ async def consultar_detector(imagen_bytes):
             raise
         except Exception as e:
             mensaje = str(e)
-            if "404" in mensaje or "NOT_FOUND" in mensaje.upper() or "not found" in mensaje.lower():
+            minusculas = mensaje.lower()
+            if "thinking" in minusculas and modelo not in caminata["sin_thinking"]:
+                caminata["sin_thinking"].add(modelo)
+                print(f"Caminata: el modelo {modelo} no admite esa configuración de razonamiento; se reintenta sin ella")
+                continue
+            if "404" in mensaje or "NOT_FOUND" in mensaje.upper() or "not found" in minusculas:
                 print(f"Caminata: el modelo {modelo} no está disponible; probando el siguiente")
                 caminata["indice_modelo"] += 1
                 ultimo_error = e
@@ -775,7 +813,7 @@ async def analizar_frame_caminata(frame_b64, websocket):
         else:
             print(f"Caminata: error en el análisis ({type(e).__name__}): {mensaje[:200]}")
     finally:
-        caminata["ocupado"] = False
+                liberar_analisis()
 
 # --- API ---
 app = FastAPI(title="Asistente Inteligente API")
@@ -1081,11 +1119,9 @@ async def websocket_asistente(websocket: WebSocket):
     db.commit()
 
     def lanzar_analisis_caminata(frame_b64):
-        """Si el detector está libre, analiza la imagen en segundo plano; si no, la salta."""
-        if caminata["ocupado"] or time.time() < caminata["pausa_hasta"]:
-            caminata["omitidos"] += 1
+        """Analiza la imagen en segundo plano si hay capacidad; si no, la salta."""
+        if not reservar_analisis():
             return
-        caminata["ocupado"] = True
         tarea = asyncio.create_task(analizar_frame_caminata(frame_b64, websocket))
         tareas_fondo.add(tarea)
         tarea.add_done_callback(tareas_fondo.discard)
